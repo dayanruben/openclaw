@@ -52,6 +52,21 @@ pnpm qa:lab:watch
 rebuilds that bundle on change, and the browser auto-reloads when the QA Lab
 asset hash changes.
 
+For a disposable Linux VM lane without bringing Docker into the QA path, run:
+
+```bash
+pnpm openclaw qa suite --runner multipass --scenario channel-chat-baseline
+```
+
+This boots a fresh Multipass guest, installs dependencies, builds OpenClaw
+inside the guest, runs `qa suite`, then copies the normal QA report and
+summary back into `.artifacts/qa-e2e/...` on the host.
+It reuses the same scenario-selection behavior as `qa suite` on the host.
+Live runs forward the supported QA auth inputs that are practical for the
+guest: env-based provider keys, the QA live provider config path, and
+`CODEX_HOME` when present. Keep `--output-dir` under the repo root so the guest
+can write back through the mounted workspace.
+
 ## Repo-backed seeds
 
 Seed assets live in `qa/`:
@@ -89,12 +104,11 @@ refs and write a judged Markdown report:
 pnpm openclaw qa character-eval \
   --model openai/gpt-5.4,thinking=xhigh \
   --model openai/gpt-5.2,thinking=xhigh \
+  --model openai/gpt-5,thinking=xhigh \
   --model anthropic/claude-opus-4-6,thinking=high \
   --model anthropic/claude-sonnet-4-6,thinking=high \
-  --model minimax/MiniMax-M2.7,thinking=high \
   --model zai/glm-5.1,thinking=high \
   --model moonshot/kimi-k2.5,thinking=high \
-  --model qwen/qwen3.5-plus,thinking=high \
   --model google/gemini-3.1-pro-preview,thinking=high \
   --judge-model openai/gpt-5.4,thinking=xhigh,fast \
   --judge-model anthropic/claude-opus-4-6,thinking=high \
@@ -128,9 +142,9 @@ Candidate and judge model runs both default to concurrency 16. Lower
 `--concurrency` or `--judge-concurrency` when provider limits or local gateway
 pressure make a run too noisy.
 When no candidate `--model` is passed, the character eval defaults to
-`openai/gpt-5.4`, `openai/gpt-5.2`, `anthropic/claude-opus-4-6`,
-`anthropic/claude-sonnet-4-6`, `minimax/MiniMax-M2.7`, `zai/glm-5.1`,
-`moonshot/kimi-k2.5`, `qwen/qwen3.5-plus`, and
+`openai/gpt-5.4`, `openai/gpt-5.2`, `openai/gpt-5`, `anthropic/claude-opus-4-6`,
+`anthropic/claude-sonnet-4-6`, `zai/glm-5.1`,
+`moonshot/kimi-k2.5`, and
 `google/gemini-3.1-pro-preview` when no `--model` is passed.
 When no `--judge-model` is passed, the judges default to
 `openai/gpt-5.4,thinking=xhigh,fast` and
