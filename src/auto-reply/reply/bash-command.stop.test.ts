@@ -146,11 +146,12 @@ describe("handleBashChatCommand stop", () => {
         mode: "non-main",
         sandboxed: true,
         toolPolicy: {
-          allowReadOutsideWorkspace: false,
-          allowReadInsideWorkspace: true,
-          allowWriteOutsideWorkspace: false,
-          allowWriteInsideWorkspace: true,
-          allowShell: true,
+          allow: [],
+          deny: ["bash"],
+          sources: {
+            allow: { source: "default", key: "agents.defaults.tools.sandbox.tools.allow" },
+            deny: { source: "default", key: "agents.defaults.tools.sandbox.tools.deny" },
+          },
         },
       });
 
