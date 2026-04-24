@@ -132,7 +132,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             type: "boolean",
             title: "Diagnostics Enabled",
             description:
-              "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Keep enabled for normal observability, and disable only in tightly constrained environments.",
+              "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Defaults to enabled; set false only in tightly constrained environments.",
           },
           flags: {
             type: "array",
@@ -823,6 +823,9 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                       type: "integer",
                       exclusiveMinimum: 0,
                       maximum: 20971520,
+                    },
+                    allowInsecurePath: {
+                      type: "boolean",
                     },
                   },
                   required: ["source", "path"],
@@ -2945,6 +2948,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                         },
                         additionalProperties: false,
                       },
+                      metadataSource: {
+                        type: "string",
+                        const: "models-add",
+                      },
                     },
                     required: ["id", "name"],
                     additionalProperties: false,
@@ -4166,6 +4173,15 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                       },
                       modelCacheDir: {
                         type: "string",
+                      },
+                      contextSize: {
+                        anyOf: [
+                          { type: "integer", exclusiveMinimum: 0, maximum: 9007199254740991 },
+                          { type: "string", const: "auto" },
+                        ],
+                        title: "Local Embedding Context Size",
+                        description:
+                          'Context window size passed to node-llama-cpp when creating the embedding context (default: 4096). 4096 safely covers typical memory-search chunks (128\u2013512 tokens) while keeping non-weight VRAM bounded. Lower to 1024\u20132048 on resource-constrained hosts. Set to "auto" to let node-llama-cpp use the model\'s trained maximum \u2014 not recommended for large models (e.g. Qwen3-Embedding-8B trained on 40\u202f960 tokens can push VRAM from ~8.8\u202fGB to ~32\u202fGB).',
                       },
                     },
                     additionalProperties: false,
@@ -6052,6 +6068,12 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                         },
                         modelCacheDir: {
                           type: "string",
+                        },
+                        contextSize: {
+                          anyOf: [
+                            { type: "integer", exclusiveMinimum: 0, maximum: 9007199254740991 },
+                            { type: "string", const: "auto" },
+                          ],
                         },
                       },
                       additionalProperties: false,
@@ -23285,7 +23307,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
     },
     "diagnostics.enabled": {
       label: "Diagnostics Enabled",
-      help: "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Keep enabled for normal observability, and disable only in tightly constrained environments.",
+      help: "Master toggle for diagnostics instrumentation output in logs and telemetry wiring paths. Defaults to enabled; set false only in tightly constrained environments.",
       tags: ["observability"],
     },
     "diagnostics.flags": {
@@ -25146,6 +25168,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Local Embedding Model Path",
       help: "Specifies the local embedding model source for local memory search, such as a GGUF file path or `hf:` URI. Use this only when provider is `local`, and verify model compatibility before large index rebuilds.",
       tags: ["storage"],
+    },
+    "agents.defaults.memorySearch.local.contextSize": {
+      label: "Local Embedding Context Size",
+      help: 'Context window size passed to node-llama-cpp when creating the embedding context (default: 4096). 4096 safely covers typical memory-search chunks (128\u2013512 tokens) while keeping non-weight VRAM bounded. Lower to 1024\u20132048 on resource-constrained hosts. Set to "auto" to let node-llama-cpp use the model\'s trained maximum \u2014 not recommended for large models (e.g. Qwen3-Embedding-8B trained on 40\u202f960 tokens can push VRAM from ~8.8\u202fGB to ~32\u202fGB).',
+      tags: ["advanced"],
     },
     "agents.defaults.memorySearch.store.path": {
       label: "Memory Search Index Path",
@@ -27728,6 +27755,6 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       tags: ["advanced", "url-secret"],
     },
   },
-  version: "2026.4.22",
+  version: "2026.4.23",
   generatedAt: "2026-03-22T21:17:33.302Z",
 };

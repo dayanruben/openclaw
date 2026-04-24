@@ -88,6 +88,36 @@ function createAutoReplyReplySplitShards() {
 
 const SPLIT_NODE_SHARDS = new Map([
   [
+    "core-unit-fast",
+    [
+      {
+        shardName: "core-unit-fast-support",
+        configs: [
+          "test/vitest/vitest.unit-fast.config.ts",
+          "test/vitest/vitest.unit-support.config.ts",
+        ],
+        includeExternalConfigs: true,
+        requiresDist: false,
+      },
+    ],
+  ],
+  [
+    "core-unit-src",
+    [
+      {
+        shardName: "core-unit-src-security",
+        configs: [
+          "test/vitest/vitest.unit-src.config.ts",
+          "test/vitest/vitest.unit-security.config.ts",
+        ],
+        includeExternalConfigs: true,
+        requiresDist: false,
+      },
+    ],
+  ],
+  ["core-unit-security", []],
+  ["core-unit-support", []],
+  [
     "core-runtime",
     [
       {
@@ -160,16 +190,14 @@ const SPLIT_NODE_SHARDS = new Map([
       },
       {
         shardName: "agentic-agents",
-        configs: [
-          "test/vitest/vitest.agents.config.ts",
-          "test/vitest/vitest.gateway-client.config.ts",
-        ],
+        configs: ["test/vitest/vitest.agents.config.ts"],
         requiresDist: false,
       },
       {
         shardName: "agentic-plugin-sdk",
         configs: [
           "test/vitest/vitest.gateway-core.config.ts",
+          "test/vitest/vitest.gateway-client.config.ts",
           "test/vitest/vitest.gateway-methods.config.ts",
           "test/vitest/vitest.plugin-sdk-light.config.ts",
           "test/vitest/vitest.plugin-sdk.config.ts",
@@ -207,7 +235,9 @@ export function createNodeTestShards() {
     const splitShards = SPLIT_NODE_SHARDS.get(shard.name);
     if (splitShards) {
       return splitShards.flatMap((splitShard) => {
-        const splitConfigs = splitShard.configs.filter((config) => configs.includes(config));
+        const splitConfigs = splitShard.includeExternalConfigs
+          ? splitShard.configs
+          : splitShard.configs.filter((config) => configs.includes(config));
         if (splitConfigs.length === 0) {
           return [];
         }

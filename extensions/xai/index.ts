@@ -1,8 +1,8 @@
-import { Type } from "@sinclair/typebox";
 import { defineSingleProviderPluginEntry } from "openclaw/plugin-sdk/provider-entry";
 import { OPENAI_COMPATIBLE_REPLAY_HOOKS } from "openclaw/plugin-sdk/provider-model-shared";
 import { defaultToolStreamExtraParams } from "openclaw/plugin-sdk/provider-stream-shared";
 import { jsonResult, readProviderEnvValue } from "openclaw/plugin-sdk/provider-web-search";
+import { Type } from "typebox";
 import {
   applyXaiModelCompat,
   buildXaiImageGenerationProvider,
@@ -14,6 +14,7 @@ import {
 import { applyXaiConfig, XAI_DEFAULT_MODEL_REF } from "./onboard.js";
 import { buildXaiProvider } from "./provider-catalog.js";
 import { isModernXaiModel, resolveXaiForwardCompatModel } from "./provider-models.js";
+import { buildXaiRealtimeTranscriptionProvider } from "./realtime-transcription-provider.js";
 import { buildXaiSpeechProvider } from "./speech-provider.js";
 import { resolveFallbackXaiAuth } from "./src/tool-auth-shared.js";
 import { resolveEffectiveXSearchConfig } from "./src/x-search-config.js";
@@ -209,6 +210,7 @@ export default defineSingleProviderPluginEntry({
     api.registerVideoGenerationProvider(buildXaiVideoGenerationProvider());
     api.registerImageGenerationProvider(buildXaiImageGenerationProvider());
     api.registerSpeechProvider(buildXaiSpeechProvider());
+    api.registerRealtimeTranscriptionProvider(buildXaiRealtimeTranscriptionProvider());
     api.registerTool((ctx) => createLazyCodeExecutionTool(ctx), { name: "code_execution" });
     api.registerTool((ctx) => createLazyXSearchTool(ctx), { name: "x_search" });
   },

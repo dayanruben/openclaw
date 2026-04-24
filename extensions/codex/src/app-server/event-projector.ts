@@ -9,7 +9,7 @@ import {
   type EmbeddedRunAttemptParams,
   type EmbeddedRunAttemptResult,
   type MessagingToolSend,
-} from "openclaw/plugin-sdk/agent-harness";
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   isJsonObject,
   type CodexServerNotification,
@@ -114,6 +114,9 @@ export class CodexAppServerEventProjector {
         break;
       case "turn/completed":
         await this.handleTurnCompleted(params);
+        break;
+      case "rawResponseItem/completed":
+        this.handleRawResponseItemCompleted(params);
         break;
       case "error":
         this.promptError = readString(params, "message") ?? "codex app-server error";
@@ -424,6 +427,20 @@ export class CodexAppServerEventProjector {
     await this.maybeEndReasoning();
   }
 
+  private handleRawResponseItemCompleted(params: JsonObject): void {
+    const item = isJsonObject(params.item) ? params.item : undefined;
+    if (!item || readString(item, "role") !== "assistant") {
+      return;
+    }
+    const text = extractRawAssistantText(item);
+    if (!text) {
+      return;
+    }
+    const itemId = readString(item, "id") ?? `raw-assistant-${this.assistantItemOrder.length + 1}`;
+    this.rememberAssistantItem(itemId);
+    this.assistantTextByItem.set(itemId, text);
+  }
+
   private async maybeEndReasoning(): Promise<void> {
     if (!this.reasoningStarted || this.reasoningEnded) {
       return;
@@ -576,9 +593,18 @@ export class CodexAppServerEventProjector {
 
   private isNotificationForTurn(params: JsonObject): boolean {
     const threadId = readString(params, "threadId");
-    const turnId = readString(params, "turnId");
-    return (!threadId || threadId === this.threadId) && (!turnId || turnId === this.turnId);
+    const turnId = readNotificationTurnId(params);
+    return threadId === this.threadId && turnId === this.turnId;
   }
+}
+
+function readNotificationTurnId(record: JsonObject): string | undefined {
+  return readString(record, "turnId") ?? readNestedTurnId(record);
+}
+
+function readNestedTurnId(record: JsonObject): string | undefined {
+  const turn = record.turn;
+  return isJsonObject(turn) ? readString(turn, "id") : undefined;
 }
 
 function readString(record: JsonObject, key: string): string | undefined {
@@ -650,6 +676,24 @@ function splitPlanText(text: string): string[] {
 
 function collectTextValues(map: Map<string, string>): string[] {
   return [...map.values()].filter((text) => text.trim().length > 0);
+}
+
+function extractRawAssistantText(item: JsonObject): string | undefined {
+  const content = Array.isArray(item.content) ? item.content : [];
+  const text = content
+    .flatMap((entry) => {
+      if (!isJsonObject(entry)) {
+        return [];
+      }
+      const type = readString(entry, "type");
+      if (type !== "output_text" && type !== "text") {
+        return [];
+      }
+      const value = readString(entry, "text");
+      return value ? [value] : [];
+    })
+    .join("");
+  return text.trim() || undefined;
 }
 
 function itemKind(
