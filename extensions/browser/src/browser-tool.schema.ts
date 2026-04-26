@@ -3,6 +3,7 @@ import { Type } from "typebox";
 
 const BROWSER_ACT_KINDS = [
   "click",
+  "clickCoords",
   "type",
   "press",
   "hover",
@@ -16,6 +17,7 @@ const BROWSER_ACT_KINDS = [
 ] as const;
 
 const BROWSER_TOOL_ACTIONS = [
+  "doctor",
   "status",
   "start",
   "stop",
@@ -54,6 +56,8 @@ const BrowserActSchema = Type.Object({
   doubleClick: Type.Optional(Type.Boolean()),
   button: Type.Optional(Type.String()),
   modifiers: Type.Optional(Type.Array(Type.String())),
+  x: Type.Optional(Type.Number()),
+  y: Type.Optional(Type.Number()),
   // type
   text: Type.Optional(Type.String()),
   submit: Type.Optional(Type.Boolean()),
@@ -121,6 +125,8 @@ export const BrowserToolSchema = Type.Object({
   doubleClick: Type.Optional(Type.Boolean()),
   button: Type.Optional(Type.String()),
   modifiers: Type.Optional(Type.Array(Type.String())),
+  x: Type.Optional(Type.Number()),
+  y: Type.Optional(Type.Number()),
   text: Type.Optional(Type.String()),
   submit: Type.Optional(Type.Boolean()),
   slowly: Type.Optional(Type.Boolean()),

@@ -10,6 +10,11 @@ vi.mock("../cli/plugin-install-plan.js", () => ({
   resolveBundledInstallPlanForCatalogEntry,
 }));
 
+const refreshPluginRegistryAfterConfigMutation = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../cli/plugins-registry-refresh.js", () => ({
+  refreshPluginRegistryAfterConfigMutation,
+}));
+
 const resolveBundledPluginSources = vi.hoisted(() => vi.fn(() => new Map()));
 const findBundledPluginSourceInMap = vi.hoisted(() => vi.fn(() => null));
 vi.mock("../plugins/bundled-sources.js", () => ({
@@ -32,7 +37,18 @@ vi.mock("../plugins/enable.js", () => ({
   enablePluginInConfig,
 }));
 
-const recordPluginInstall = vi.hoisted(() => vi.fn((cfg) => cfg));
+const recordPluginInstall = vi.hoisted(() =>
+  vi.fn((cfg: OpenClawConfig, update: { pluginId: string }) => ({
+    ...cfg,
+    plugins: {
+      ...cfg.plugins,
+      installs: {
+        ...cfg.plugins?.installs,
+        [update.pluginId]: update,
+      },
+    },
+  })),
+);
 const buildNpmResolutionInstallFields = vi.hoisted(() => vi.fn(() => ({})));
 vi.mock("../plugins/installs.js", () => ({
   recordPluginInstall,
@@ -50,6 +66,7 @@ describe("ensureOnboardingPluginInstalled", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     withTimeout.mockImplementation(async <T>(promise: Promise<T>) => await promise);
+    refreshPluginRegistryAfterConfigMutation.mockResolvedValue(undefined);
   });
 
   it("passes npm specs and optional expected integrity to npm installs with progress", async () => {
@@ -123,6 +140,13 @@ describe("ensureOnboardingPluginInstalled", () => {
     );
     expect(result.installed).toBe(true);
     expect(result.status).toBe("installed");
+    expect(result.cfg.plugins?.installs).toBeUndefined();
+    expect(refreshPluginRegistryAfterConfigMutation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: result.cfg,
+        reason: "source-changed",
+      }),
+    );
   });
 
   it("returns a timed out status and notes the retry path when npm install hangs", async () => {
@@ -443,6 +467,7 @@ describe("ensureOnboardingPluginInstalled", () => {
       );
       expect(result.installed).toBe(true);
       expect(result.status).toBe("installed");
+      expect(result.cfg.plugins?.installs).toBeUndefined();
     });
   });
 
@@ -502,6 +527,7 @@ describe("ensureOnboardingPluginInstalled", () => {
         );
         expect(result.installed).toBe(true);
         expect(result.status).toBe("installed");
+        expect(result.cfg.plugins?.installs).toBeUndefined();
       },
     );
   });

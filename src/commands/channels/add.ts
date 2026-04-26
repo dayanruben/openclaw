@@ -5,7 +5,13 @@ import { moveSingleAccountChannelSectionToDefaultAccount } from "../../channels/
 import type { ChannelSetupPlugin } from "../../channels/plugins/setup-wizard-types.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.plugin.js";
 import type { ChannelId, ChannelSetupInput } from "../../channels/plugins/types.public.js";
+import { refreshPluginRegistryAfterConfigMutation } from "../../cli/plugins-registry-refresh.js";
 import { replaceConfigFile, type OpenClawConfig } from "../../config/config.js";
+import {
+  PLUGIN_INSTALLS_CONFIG_PATH,
+  withoutPluginInstallRecords,
+  writePersistedInstalledPluginIndexInstallRecords,
+} from "../../plugins/installed-plugin-index-records.js";
 import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv } from "../../runtime.js";
 import { normalizeOptionalLowercaseString } from "../../shared/string-coerce.js";
@@ -111,6 +117,7 @@ export async function channelsAddCommand(
   const cfg = (configSnapshot.sourceConfig ?? configSnapshot.config) as OpenClawConfig;
   const baseHash = configSnapshot.hash;
   let nextConfig = cfg;
+  let pluginRegistrySourceChanged = false;
 
   const useWizard = shouldUseWizard(params);
   if (useWizard) {
@@ -237,13 +244,32 @@ export async function channelsAddCommand(
       }
     }
 
+    const shouldMovePluginInstalls = Boolean(
+      nextConfig.plugins?.installs && Object.keys(nextConfig.plugins.installs).length > 0,
+    );
+    const writtenConfig = shouldMovePluginInstalls
+      ? withoutPluginInstallRecords(nextConfig)
+      : nextConfig;
+    if (shouldMovePluginInstalls) {
+      await writePersistedInstalledPluginIndexInstallRecords(nextConfig.plugins?.installs ?? {});
+    }
     await replaceConfigFile({
-      nextConfig,
+      nextConfig: writtenConfig,
       ...(baseHash !== undefined ? { baseHash } : {}),
+      ...(shouldMovePluginInstalls
+        ? { writeOptions: { unsetPaths: [Array.from(PLUGIN_INSTALLS_CONFIG_PATH)] } }
+        : {}),
     });
+    if (shouldMovePluginInstalls) {
+      await refreshPluginRegistryAfterConfigMutation({
+        config: writtenConfig,
+        reason: "source-changed",
+        logger: { warn: (message) => runtime.log(message) },
+      });
+    }
     await onboardChannels.runCollectedChannelOnboardingPostWriteHooks({
       hooks: postWriteHooks.drain(),
-      cfg: nextConfig,
+      cfg: writtenConfig,
       runtime,
     });
     await prompter.outro("Channels updated.");
@@ -303,6 +329,7 @@ export async function channelsAddCommand(
       if (!result.installed) {
         return;
       }
+      pluginRegistrySourceChanged = true;
       catalogEntry = {
         ...catalogEntry,
         ...(result.pluginId ? { pluginId: result.pluginId } : {}),
@@ -368,10 +395,29 @@ export async function channelsAddCommand(
     runtime,
   });
 
+  const shouldMovePluginInstalls = Boolean(
+    nextConfig.plugins?.installs && Object.keys(nextConfig.plugins.installs).length > 0,
+  );
+  const writtenConfig = shouldMovePluginInstalls
+    ? withoutPluginInstallRecords(nextConfig)
+    : nextConfig;
+  if (shouldMovePluginInstalls) {
+    await writePersistedInstalledPluginIndexInstallRecords(nextConfig.plugins?.installs ?? {});
+  }
   await replaceConfigFile({
-    nextConfig,
+    nextConfig: writtenConfig,
     ...(baseHash !== undefined ? { baseHash } : {}),
+    ...(shouldMovePluginInstalls
+      ? { writeOptions: { unsetPaths: [Array.from(PLUGIN_INSTALLS_CONFIG_PATH)] } }
+      : {}),
   });
+  if (shouldMovePluginInstalls || pluginRegistrySourceChanged) {
+    await refreshPluginRegistryAfterConfigMutation({
+      config: writtenConfig,
+      reason: "source-changed",
+      logger: { warn: (message) => runtime.log(message) },
+    });
+  }
   runtime.log(`Added ${plugin.meta.label ?? channelLabel(channel)} account "${accountId}".`);
   const afterAccountConfigWritten = plugin.setup?.afterAccountConfigWritten;
   if (afterAccountConfigWritten) {

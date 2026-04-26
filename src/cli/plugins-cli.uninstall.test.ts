@@ -5,12 +5,15 @@ import {
   buildPluginDiagnosticsReport,
   loadConfig,
   promptYesNo,
+  refreshPluginRegistry,
   resetPluginsCliTestState,
   runPluginsCommand,
   runtimeErrors,
   runtimeLogs,
+  setInstalledPluginIndexInstallRecords,
   uninstallPlugin,
   writeConfigFile,
+  writePersistedInstalledPluginIndexInstallRecords,
 } from "./plugins-cli-test-helpers.js";
 
 const CLI_STATE_ROOT = "/tmp/openclaw-state";
@@ -47,6 +50,7 @@ describe("plugins cli uninstall", () => {
 
     expect(uninstallPlugin).not.toHaveBeenCalled();
     expect(writeConfigFile).not.toHaveBeenCalled();
+    expect(refreshPluginRegistry).not.toHaveBeenCalled();
     expect(runtimeLogs.some((line) => line.includes("Dry run, no changes made."))).toBe(true);
   });
 
@@ -73,6 +77,7 @@ describe("plugins cli uninstall", () => {
     } as OpenClawConfig;
 
     loadConfig.mockReturnValue(baseConfig);
+    setInstalledPluginIndexInstallRecords(baseConfig.plugins?.installs ?? {});
     buildPluginDiagnosticsReport.mockReturnValue({
       plugins: [{ id: "alpha", name: "alpha" }],
       diagnostics: [],
@@ -100,7 +105,21 @@ describe("plugins cli uninstall", () => {
         deleteFiles: false,
       }),
     );
-    expect(writeConfigFile).toHaveBeenCalledWith(nextConfig);
+    expect(writePersistedInstalledPluginIndexInstallRecords).toHaveBeenCalledWith({});
+    expect(writeConfigFile).toHaveBeenCalledWith({
+      plugins: {
+        entries: {},
+      },
+    });
+    expect(refreshPluginRegistry).toHaveBeenCalledWith({
+      config: {
+        plugins: {
+          entries: {},
+        },
+      },
+      installRecords: {},
+      reason: "source-changed",
+    });
   });
 
   it("exits when uninstall target is not managed by plugin install records", async () => {

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveBundledInstallPlanForCatalogEntry } from "../cli/plugin-install-plan.js";
+import { refreshPluginRegistryAfterConfigMutation } from "../cli/plugins-registry-refresh.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { parseRegistryNpmSpec } from "../infra/npm-registry-spec.js";
 import {
@@ -9,6 +10,12 @@ import {
 } from "../plugins/bundled-sources.js";
 import { enablePluginInConfig, type PluginEnableResult } from "../plugins/enable.js";
 import { installPluginFromNpmSpec } from "../plugins/install.js";
+import {
+  loadInstalledPluginIndexInstallRecords,
+  recordPluginInstallInRecords,
+  withoutPluginInstallRecords,
+  writePersistedInstalledPluginIndexInstallRecords,
+} from "../plugins/installed-plugin-index-records.js";
 import { buildNpmResolutionInstallFields, recordPluginInstall } from "../plugins/installs.js";
 import type { PluginPackageInstall } from "../plugins/manifest.js";
 import type { RuntimeEnv } from "../runtime.js";
@@ -135,20 +142,53 @@ function formatPortableLocalPath(localPath: string, workspaceDir?: string): stri
   return undefined;
 }
 
-function recordLocalPluginInstall(params: {
+async function persistOnboardingPluginInstallRecord(params: {
+  cfg: OpenClawConfig;
+  install: Parameters<typeof recordPluginInstallInRecords>[1];
+}) {
+  const records = await loadInstalledPluginIndexInstallRecords();
+  await writePersistedInstalledPluginIndexInstallRecords(
+    recordPluginInstallInRecords(records, params.install),
+    { config: params.cfg },
+  );
+}
+
+async function refreshRegistryAfterOnboardingPluginInstall(params: {
+  cfg: OpenClawConfig;
+  refreshRegistry?: boolean;
+  runtime: RuntimeEnv;
+  workspaceDir?: string;
+}) {
+  if (params.refreshRegistry === false) {
+    return;
+  }
+  await refreshPluginRegistryAfterConfigMutation({
+    config: params.cfg,
+    reason: "source-changed",
+    ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
+    logger: { warn: (message) => params.runtime.log(message) },
+  });
+}
+
+async function recordLocalPluginInstall(params: {
   cfg: OpenClawConfig;
   entry: OnboardingPluginInstallEntry;
   localPath: string;
   npmSpec?: string | null;
   workspaceDir?: string;
-}): OpenClawConfig {
+}): Promise<OpenClawConfig> {
   const sourcePath = formatPortableLocalPath(params.localPath, params.workspaceDir);
-  return recordPluginInstall(params.cfg, {
+  const install = {
     pluginId: params.entry.pluginId,
     source: "path",
     ...(sourcePath ? { sourcePath } : {}),
     ...(params.npmSpec ? { spec: params.npmSpec } : {}),
+  } as const;
+  await persistOnboardingPluginInstallRecord({
+    cfg: params.cfg,
+    install,
   });
+  return withoutPluginInstallRecords(recordPluginInstall(params.cfg, install));
 }
 
 function resolveLocalPath(params: {
@@ -419,6 +459,7 @@ export async function ensureOnboardingPluginInstalled(params: {
   cfg: OpenClawConfig;
   entry: OnboardingPluginInstallEntry;
   prompter: WizardPrompter;
+  refreshRegistry?: boolean;
   runtime: RuntimeEnv;
   workspaceDir?: string;
 }): Promise<OnboardingPluginInstallResult> {
@@ -474,7 +515,13 @@ export async function ensureOnboardingPluginInstalled(params: {
       };
     }
     next = addPluginLoadPath(enableResult.config, localPath);
-    next = recordLocalPluginInstall({ cfg: next, entry, localPath, npmSpec, workspaceDir });
+    next = await recordLocalPluginInstall({ cfg: next, entry, localPath, npmSpec, workspaceDir });
+    await refreshRegistryAfterOnboardingPluginInstall({
+      cfg: next,
+      refreshRegistry: params.refreshRegistry,
+      runtime,
+      workspaceDir,
+    });
     return {
       cfg: next,
       installed: true,
@@ -544,13 +591,24 @@ export async function ensureOnboardingPluginInstalled(params: {
       };
     }
     next = enableResult.config;
-    next = recordPluginInstall(next, {
+    const install = {
       pluginId: result.pluginId,
       source: "npm",
       spec: npmSpec,
       installPath: result.targetDir,
       version: result.version,
       ...buildNpmResolutionInstallFields(result.npmResolution),
+    } as const;
+    await persistOnboardingPluginInstallRecord({
+      cfg: next,
+      install,
+    });
+    next = withoutPluginInstallRecords(recordPluginInstall(next, install));
+    await refreshRegistryAfterOnboardingPluginInstall({
+      cfg: next,
+      refreshRegistry: params.refreshRegistry,
+      runtime,
+      workspaceDir,
     });
     return {
       cfg: next,
@@ -590,7 +648,13 @@ export async function ensureOnboardingPluginInstalled(params: {
         };
       }
       next = addPluginLoadPath(enableResult.config, localPath);
-      next = recordLocalPluginInstall({ cfg: next, entry, localPath, npmSpec, workspaceDir });
+      next = await recordLocalPluginInstall({ cfg: next, entry, localPath, npmSpec, workspaceDir });
+      await refreshRegistryAfterOnboardingPluginInstall({
+        cfg: next,
+        refreshRegistry: params.refreshRegistry,
+        runtime,
+        workspaceDir,
+      });
       return {
         cfg: next,
         installed: true,
