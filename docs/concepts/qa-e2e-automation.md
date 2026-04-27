@@ -50,6 +50,30 @@ pnpm qa:lab:watch
 rebuilds that bundle on change, and the browser auto-reloads when the QA Lab
 asset hash changes.
 
+For a local OpenTelemetry trace smoke, run:
+
+```bash
+pnpm qa:otel:smoke
+```
+
+That script starts a local OTLP/HTTP trace receiver, runs the
+`otel-trace-smoke` QA scenario with the `diagnostics-otel` plugin enabled, then
+decodes the exported protobuf spans and asserts the release-critical shape:
+`openclaw.run`, `openclaw.harness.run`, `openclaw.model.call`,
+`openclaw.context.assembled`, and `openclaw.message.delivery` must be present;
+model calls must not export `StreamAbandoned` on successful turns; raw diagnostic IDs and
+`openclaw.content.*` attributes must stay out of the trace. It writes
+`otel-smoke-summary.json` next to the QA suite artifacts.
+
+The normal Docker aggregate and release-path core chunk also run an
+observability lane. It reuses the shared package-installed functional Docker
+image, mounts the QA harness files read-only, runs the OTEL trace smoke inside
+the container, then runs the `docker-prometheus-smoke` QA scenario with the
+`diagnostics-prometheus` plugin enabled. Set
+`OPENCLAW_DOCKER_OBSERVABILITY_LOOPS=<count>` to repeat both checks inside one
+Docker run while preserving per-loop artifacts under
+`.artifacts/docker-observability/...`.
+
 For a transport-real Matrix smoke lane, run:
 
 ```bash

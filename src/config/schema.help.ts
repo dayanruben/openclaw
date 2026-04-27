@@ -43,9 +43,9 @@ export const FIELD_HELP: Record<string, string> = {
   "logging.consoleStyle":
     'Console output format style: "pretty", "compact", or "json" based on operator and ingestion needs. Use json for machine parsing pipelines and pretty/compact for human-first terminal workflows.',
   "logging.redactSensitive":
-    'Sensitive redaction mode: "off" disables built-in masking, while "tools" redacts sensitive tool/config payload fields. Keep "tools" in shared logs unless you have isolated secure log sinks.',
+    'Sensitive redaction mode: "off" disables built-in masking, while "tools" redacts sensitive tool/config payload fields in log sinks and persisted transcript text. Keep "tools" enabled unless logs and transcripts are isolated.',
   "logging.redactPatterns":
-    "Additional custom redact regex patterns applied to log output before emission/storage. Use this to mask org-specific tokens and identifiers not covered by built-in redaction rules.",
+    "Additional custom redact regex patterns applied to log output and persisted transcript text before storage. Use this to mask org-specific tokens and identifiers not covered by built-in redaction rules.",
   cli: "CLI presentation controls for local command output behavior such as banner and tagline style. Use this section to keep startup output aligned with operator preference without changing runtime behavior.",
   "cli.banner":
     "CLI startup banner controls for title/version line and tagline style behavior. Keep banner enabled for fast version/context checks, then tune tagline mode to your preferred noise level.",
@@ -566,6 +566,12 @@ export const FIELD_HELP: Record<string, string> = {
     "Enables OpenTelemetry export pipeline for traces, metrics, and logs based on configured endpoint/protocol settings. Keep disabled unless your collector endpoint and auth are fully configured.",
   "diagnostics.otel.endpoint":
     "Collector endpoint URL used for OpenTelemetry export transport, including scheme and port. Use a reachable, trusted collector endpoint and monitor ingestion errors after rollout.",
+  "diagnostics.otel.tracesEndpoint":
+    "Signal-specific OTLP/HTTP trace endpoint. When set, this overrides diagnostics.otel.endpoint and OTEL_EXPORTER_OTLP_ENDPOINT for trace export only.",
+  "diagnostics.otel.metricsEndpoint":
+    "Signal-specific OTLP/HTTP metrics endpoint. When set, this overrides diagnostics.otel.endpoint and OTEL_EXPORTER_OTLP_ENDPOINT for metrics export only.",
+  "diagnostics.otel.logsEndpoint":
+    "Signal-specific OTLP/HTTP logs endpoint. When set, this overrides diagnostics.otel.endpoint and OTEL_EXPORTER_OTLP_ENDPOINT for log export only.",
   "diagnostics.otel.protocol":
     'OTel transport protocol for telemetry export: "http/protobuf" or "grpc" depending on collector support. Use the protocol your observability backend expects to avoid dropped telemetry payloads.',
   "diagnostics.otel.headers":
@@ -1157,7 +1163,7 @@ export const FIELD_HELP: Record<string, string> = {
   "plugins.entries.*.hooks.allowPromptInjection":
     "Controls whether this plugin may mutate prompts through typed hooks. Set false to block `before_prompt_build` and ignore prompt-mutating fields from legacy `before_agent_start`, while preserving legacy `modelOverride` and `providerOverride` behavior.",
   "plugins.entries.*.hooks.allowConversationAccess":
-    "Controls whether this plugin may read raw conversation content from typed hooks such as `llm_input`, `llm_output`, and `agent_end`. Non-bundled plugins must opt in explicitly.",
+    "Controls whether this plugin may read raw conversation content from typed hooks such as `llm_input`, `llm_output`, `before_agent_finalize`, and `agent_end`. Non-bundled plugins must opt in explicitly.",
   "plugins.entries.*.subagent":
     "Per-plugin subagent runtime controls for model override trust and allowlists. Keep this unset unless a plugin must explicitly steer subagent model selection.",
   "plugins.entries.*.subagent.allowModelOverride":
@@ -1175,18 +1181,27 @@ export const FIELD_HELP: Record<string, string> = {
   "agents.defaults.model.primary": "Primary model (provider/model).",
   "agents.defaults.model.fallbacks":
     "Ordered fallback models (provider/model). Used when the primary model fails.",
+  "agents.defaults.agentRuntime":
+    "Default agent runtime policy. Omitted id uses built-in OpenClaw Pi. Use id=auto for plugin harness selection, a registered harness id such as codex, or a supported CLI backend alias such as claude-cli.",
+  "agents.defaults.agentRuntime.id":
+    "Agent runtime id: pi, auto, a registered plugin harness id such as codex, or a supported CLI backend alias such as claude-cli. Omitted id uses built-in OpenClaw Pi.",
+  "agents.defaults.agentRuntime.fallback":
+    "Agent runtime fallback when no plugin harness matches. Auto mode defaults to pi; explicit plugin runtimes default to none and do not inherit broader fallback settings. Selected plugin harness failures surface directly.",
   "agents.defaults.embeddedHarness":
-    "Default embedded agent harness policy. Omitted runtime uses built-in OpenClaw Pi. Use runtime=auto for plugin harness selection, or a registered harness id such as codex.",
-  "agents.defaults.embeddedHarness.runtime":
-    "Embedded harness runtime: pi, auto, or a registered plugin harness id such as codex. Omitted runtime uses built-in OpenClaw Pi.",
+    "Legacy input for agents.defaults.agentRuntime. Run openclaw doctor --fix to rewrite it to agentRuntime.",
+  "agents.defaults.embeddedHarness.runtime": "Legacy input for agents.defaults.agentRuntime.id.",
   "agents.defaults.embeddedHarness.fallback":
-    "Embedded harness fallback when no plugin harness matches. Auto mode defaults to pi; explicit plugin runtimes default to none and do not inherit broader fallback settings. Selected plugin harness failures surface directly.",
+    "Legacy input for agents.defaults.agentRuntime.fallback.",
+  "agents.list.*.agentRuntime":
+    "Per-agent agent runtime policy override. Use id=codex to force Codex for one agent while defaults stay in auto mode.",
+  "agents.list.*.agentRuntime.id":
+    "Per-agent agent runtime id: pi, auto, a registered plugin harness id such as codex, or a supported CLI backend alias such as claude-cli. Omitted id inherits the default OpenClaw Pi behavior.",
+  "agents.list.*.agentRuntime.fallback":
+    "Per-agent agent runtime fallback. Auto mode defaults to pi; explicit plugin runtimes default to none and do not inherit broader fallback settings.",
   "agents.list.*.embeddedHarness":
-    "Per-agent embedded harness policy override. Use runtime=codex to force Codex for one agent while defaults stay in auto mode.",
-  "agents.list.*.embeddedHarness.runtime":
-    "Per-agent embedded harness runtime: pi, auto, or a registered plugin harness id such as codex. Omitted runtime inherits the default OpenClaw Pi behavior.",
-  "agents.list.*.embeddedHarness.fallback":
-    "Per-agent embedded harness fallback. Auto mode defaults to pi; explicit plugin runtimes default to none and do not inherit broader fallback settings.",
+    "Legacy input for agents.list.*.agentRuntime. Run openclaw doctor --fix to rewrite it to agentRuntime.",
+  "agents.list.*.embeddedHarness.runtime": "Legacy input for agents.list.*.agentRuntime.id.",
+  "agents.list.*.embeddedHarness.fallback": "Legacy input for agents.list.*.agentRuntime.fallback.",
   "agents.defaults.imageModel.primary":
     "Optional image model (provider/model) used when the primary model lacks image input.",
   "agents.defaults.imageModel.fallbacks": "Ordered fallback image models (provider/model).",
@@ -1583,6 +1598,16 @@ export const FIELD_HELP: Record<string, string> = {
     "Removes the acknowledgment reaction after final reply delivery when enabled. Keep enabled for cleaner UX in channels where persistent ack reactions create clutter.",
   "messages.tts":
     "Text-to-speech policy for reading agent replies aloud on supported voice or audio surfaces. Keep disabled unless voice playback is part of your operator/user workflow.",
+  "messages.tts.persona":
+    "Default TTS persona id. Local TTS persona preferences can override this per host.",
+  "messages.tts.personas":
+    "Named TTS personas that define stable spoken identity plus provider-specific speech bindings.",
+  "messages.tts.personas.*":
+    "One TTS persona. Use provider-specific bindings for exact voices/models and prompt templates.",
+  "messages.tts.personas.*.prompt":
+    "Provider-neutral persona prompt intent. Providers decide whether and how to map this into request instructions.",
+  "messages.tts.personas.*.providers":
+    "Provider-specific TTS persona bindings keyed by speech provider id. These merge over messages.tts.providers for the active persona.",
   "messages.tts.providers":
     "Provider-specific TTS settings keyed by speech provider id. Use this instead of bundled provider-specific top-level keys so speech plugins stay decoupled from core config schema.",
   "messages.tts.providers.*":
