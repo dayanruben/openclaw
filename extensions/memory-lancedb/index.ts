@@ -11,6 +11,11 @@ import { randomUUID } from "node:crypto";
 import type * as LanceDB from "@lancedb/lancedb";
 import OpenAI from "openai";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
+import {
+  getMemoryEmbeddingProvider,
+  type MemoryEmbeddingProvider,
+} from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
+import { resolveDefaultAgentId } from "openclaw/plugin-sdk/memory-host-core";
 import { resolveLivePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { ensureGlobalUndiciEnvProxyDispatcher } from "openclaw/plugin-sdk/runtime-env";
 import {
@@ -23,6 +28,7 @@ import {
   DEFAULT_CAPTURE_MAX_CHARS,
   DEFAULT_RECALL_MAX_CHARS,
   MEMORY_CATEGORIES,
+  type MemoryConfig,
   type MemoryCategory,
   memoryConfigSchema,
   vectorDimsForModel,
@@ -143,6 +149,7 @@ function resolveAutoCaptureStartIndex(
 // ============================================================================
 
 const TABLE_NAME = "memories";
+const DEFAULT_AUTO_RECALL_TIMEOUT_MS = 15_000;
 
 class MemoryDB {
   private db: LanceDB.Connection | null = null;
@@ -252,10 +259,14 @@ class MemoryDB {
 }
 
 // ============================================================================
-// OpenAI Embeddings
+// Embeddings
 // ============================================================================
 
-class Embeddings {
+type Embeddings = {
+  embed(text: string, options?: { timeoutMs?: number }): Promise<number[]>;
+};
+
+class OpenAiCompatibleEmbeddings implements Embeddings {
   private client: OpenAI;
 
   constructor(
@@ -267,7 +278,7 @@ class Embeddings {
     this.client = new OpenAI({ apiKey, baseURL: baseUrl });
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(text: string, options?: { timeoutMs?: number }): Promise<number[]> {
     const params: OpenAI.EmbeddingCreateParams = {
       model: this.model,
       input: text,
@@ -282,9 +293,100 @@ class Embeddings {
     // transport and normalize the response ourselves.
     const response = await this.client.post<EmbeddingCreateResponse>("/embeddings", {
       body: params,
+      ...(options?.timeoutMs ? { timeout: options.timeoutMs, maxRetries: 0 } : {}),
     });
     return normalizeEmbeddingVector(response.data?.[0]?.embedding);
   }
+}
+
+class ProviderAdapterEmbeddings implements Embeddings {
+  private providerPromise: Promise<MemoryEmbeddingProvider> | undefined;
+
+  constructor(
+    private api: OpenClawPluginApi,
+    private embedding: MemoryConfig["embedding"],
+  ) {}
+
+  private getProvider(): Promise<MemoryEmbeddingProvider> {
+    // Auth profiles and local providers can be repaired while the Gateway stays up.
+    // Cache successful setup, but retry after failed provider discovery/auth.
+    this.providerPromise ??= this.createProvider().catch((err) => {
+      this.providerPromise = undefined;
+      throw err;
+    });
+    return this.providerPromise;
+  }
+
+  private async createProvider(): Promise<MemoryEmbeddingProvider> {
+    const cfg = (this.api.runtime.config?.current?.() ?? this.api.config) as OpenClawConfig;
+    const providerId = this.embedding.provider;
+    const adapter = getMemoryEmbeddingProvider(providerId, cfg);
+    if (!adapter) {
+      throw new Error(`Unknown memory embedding provider: ${providerId}`);
+    }
+    const defaultAgentId = resolveDefaultAgentId(cfg);
+    const agentDir = this.api.runtime.agent.resolveAgentDir(cfg, defaultAgentId);
+    const remote =
+      this.embedding.apiKey || this.embedding.baseUrl
+        ? {
+            ...(this.embedding.apiKey ? { apiKey: this.embedding.apiKey } : {}),
+            ...(this.embedding.baseUrl ? { baseUrl: this.embedding.baseUrl } : {}),
+          }
+        : undefined;
+    const result = await adapter.create({
+      config: cfg,
+      agentDir,
+      provider: providerId,
+      fallback: "none",
+      model: this.embedding.model,
+      ...(remote ? { remote } : {}),
+      ...(typeof this.embedding.dimensions === "number"
+        ? { outputDimensionality: this.embedding.dimensions }
+        : {}),
+    });
+    if (!result.provider) {
+      throw new Error(`Memory embedding provider ${providerId} is unavailable.`);
+    }
+    return result.provider;
+  }
+
+  async embed(text: string): Promise<number[]> {
+    return await (await this.getProvider()).embedQuery(text);
+  }
+}
+
+async function runWithTimeout<T>(params: {
+  timeoutMs: number;
+  task: () => Promise<T>;
+}): Promise<{ status: "ok"; value: T } | { status: "timeout" }> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const TIMEOUT = Symbol("timeout");
+  const timeoutPromise = new Promise<typeof TIMEOUT>((resolve) => {
+    timeout = setTimeout(() => resolve(TIMEOUT), params.timeoutMs);
+    timeout.unref?.();
+  });
+  const taskPromise = params.task();
+  taskPromise.catch(() => undefined);
+
+  try {
+    const result = await Promise.race([taskPromise, timeoutPromise]);
+    if (result === TIMEOUT) {
+      return { status: "timeout" };
+    }
+    return { status: "ok", value: result };
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function createEmbeddings(api: OpenClawPluginApi, cfg: MemoryConfig): Embeddings {
+  const { provider, model, dimensions, apiKey, baseUrl } = cfg.embedding;
+  if (provider === "openai" && apiKey) {
+    return new OpenAiCompatibleEmbeddings(apiKey, model, baseUrl, dimensions);
+  }
+  return new ProviderAdapterEmbeddings(api, cfg.embedding);
 }
 
 type EmbeddingCreateResponse = {
@@ -429,15 +531,27 @@ export default definePluginEntry({
   configSchema: memoryConfigSchema,
 
   register(api: OpenClawPluginApi) {
-    const cfg = memoryConfigSchema.parse(api.pluginConfig);
+    let cfg: MemoryConfig;
+    try {
+      cfg = memoryConfigSchema.parse(api.pluginConfig);
+    } catch (error) {
+      api.registerService({
+        id: "memory-lancedb",
+        start: () => {
+          const message = error instanceof Error ? error.message : String(error);
+          api.logger.warn(`memory-lancedb: disabled until configured (${message})`);
+        },
+      });
+      return;
+    }
     const dbPath = cfg.dbPath!;
     const resolvedDbPath = dbPath.includes("://") ? dbPath : api.resolvePath(dbPath);
-    const { model, dimensions, apiKey, baseUrl } = cfg.embedding;
+    const { model, dimensions } = cfg.embedding;
     const disabledHookCfg = { ...cfg, autoCapture: false, autoRecall: false };
 
     const vectorDim = dimensions ?? vectorDimsForModel(model);
     const db = new MemoryDB(resolvedDbPath, vectorDim, cfg.storageOptions);
-    const embeddings = new Embeddings(apiKey, model, baseUrl, dimensions);
+    const embeddings = createEmbeddings(api, cfg);
     const autoCaptureCursors = new Map<string, AutoCaptureCursor>();
     const resolveCurrentHookConfig = () => {
       const runtimePluginConfig = resolveLivePluginConfigObject(
@@ -452,6 +566,7 @@ export default definePluginEntry({
       }
       return memoryConfigSchema.parse({
         embedding: {
+          provider: cfg.embedding.provider,
           apiKey: cfg.embedding.apiKey,
           model: cfg.embedding.model,
           ...(cfg.embedding.baseUrl ? { baseUrl: cfg.embedding.baseUrl } : {}),
@@ -465,6 +580,7 @@ export default definePluginEntry({
         autoCapture: cfg.autoCapture,
         autoRecall: cfg.autoRecall,
         captureMaxChars: cfg.captureMaxChars,
+        recallMaxChars: cfg.recallMaxChars,
         ...(cfg.storageOptions ? { storageOptions: cfg.storageOptions } : {}),
         ...asRecord(runtimePluginConfig),
       });
@@ -730,8 +846,22 @@ export default definePluginEntry({
             event.prompt,
           currentCfg.recallMaxChars,
         );
-        const vector = await embeddings.embed(recallQuery);
-        const results = await db.search(vector, 3, 0.3);
+        const recall = await runWithTimeout({
+          timeoutMs: DEFAULT_AUTO_RECALL_TIMEOUT_MS,
+          task: async () => {
+            const vector = await embeddings.embed(recallQuery, {
+              timeoutMs: DEFAULT_AUTO_RECALL_TIMEOUT_MS,
+            });
+            return await db.search(vector, 3, 0.3);
+          },
+        });
+        if (recall.status === "timeout") {
+          api.logger.warn?.(
+            `memory-lancedb: auto-recall timed out after ${DEFAULT_AUTO_RECALL_TIMEOUT_MS}ms; skipping memory injection to avoid stalling agent startup`,
+          );
+          return undefined;
+        }
+        const results = recall.value;
 
         if (results.length === 0) {
           return undefined;

@@ -4,9 +4,9 @@ import { join } from "node:path";
 
 export type MemoryConfig = {
   embedding: {
-    provider: "openai";
+    provider: string;
     model: string;
-    apiKey: string;
+    apiKey?: string;
     baseUrl?: string;
     dimensions?: number;
   };
@@ -58,6 +58,7 @@ const EMBEDDING_DIMENSIONS: Record<string, number> = {
   "text-embedding-3-small": 1536,
   "text-embedding-3-large": 3072,
 };
+const EMBEDDING_CONFIG_KEYS = ["provider", "apiKey", "model", "baseUrl", "dimensions"] as const;
 
 function assertAllowedKeys(value: Record<string, unknown>, allowed: string[], label: string) {
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
@@ -115,12 +116,19 @@ export const memoryConfigSchema = {
     );
 
     const embedding = cfg.embedding as Record<string, unknown> | undefined;
-    if (!embedding || typeof embedding.apiKey !== "string") {
-      throw new Error("embedding.apiKey is required");
+    if (!embedding || typeof embedding !== "object" || Array.isArray(embedding)) {
+      throw new Error("embedding config required");
     }
-    assertAllowedKeys(embedding, ["apiKey", "model", "baseUrl", "dimensions"], "embedding config");
+    assertAllowedKeys(embedding, [...EMBEDDING_CONFIG_KEYS], "embedding config");
+    if (Object.keys(embedding).length === 0) {
+      throw new Error("embedding config must include at least one setting");
+    }
 
     const model = resolveEmbeddingModel(embedding);
+    const provider = typeof embedding.provider === "string" ? embedding.provider.trim() : "openai";
+    if (!provider) {
+      throw new Error("embedding.provider must not be empty");
+    }
 
     const captureMaxChars =
       typeof cfg.captureMaxChars === "number" ? Math.floor(cfg.captureMaxChars) : undefined;
@@ -164,9 +172,9 @@ export const memoryConfigSchema = {
 
     return {
       embedding: {
-        provider: "openai",
+        provider,
         model,
-        apiKey: resolveEnvVars(embedding.apiKey),
+        apiKey: typeof embedding.apiKey === "string" ? resolveEnvVars(embedding.apiKey) : undefined,
         baseUrl:
           typeof embedding.baseUrl === "string" ? resolveEnvVars(embedding.baseUrl) : undefined,
         dimensions: typeof embedding.dimensions === "number" ? embedding.dimensions : undefined,
@@ -181,16 +189,21 @@ export const memoryConfigSchema = {
     };
   },
   uiHints: {
+    "embedding.provider": {
+      label: "Embedding Provider",
+      placeholder: "openai",
+      help: "Memory embedding provider adapter to use (for example openai, github-copilot, ollama)",
+    },
     "embedding.apiKey": {
       label: "OpenAI API Key",
       sensitive: true,
       placeholder: "sk-proj-...",
-      help: "API key for OpenAI embeddings (or use ${OPENAI_API_KEY})",
+      help: "Optional API key override for OpenAI-compatible embeddings; omit to use configured provider auth",
     },
     "embedding.baseUrl": {
       label: "Base URL",
       placeholder: "https://api.openai.com/v1",
-      help: "Base URL for compatible providers (e.g. http://localhost:11434/v1)",
+      help: "Optional provider or OpenAI-compatible embedding endpoint base URL",
       advanced: true,
     },
     "embedding.dimensions": {

@@ -1,5 +1,9 @@
-// Narrow public testing surface for plugin authors.
-// Keep this list additive and limited to helpers we are willing to support.
+/**
+ * @deprecated Broad compatibility barrel for older plugin tests.
+ *
+ * New tests should import focused `openclaw/plugin-sdk/*` test subpaths such as
+ * `plugin-test-runtime`, `channel-test-helpers`, `test-env`, or `test-fixtures`.
+ */
 
 export {
   createAckReactionHandle,
@@ -49,7 +53,7 @@ export { resolveBundledExplicitProviderContractsFromPublicArtifacts } from "../p
 export {
   expectAugmentedCodexCatalog,
   expectedAugmentedOpenaiCodexCatalogEntriesWithGpt55,
-  expectCodexBuiltInSuppression,
+  expectedOpenaiPluginCodexCatalogEntriesWithGpt55,
   expectCodexMissingAuthHint,
 } from "../plugins/provider-runtime.test-support.js";
 export {

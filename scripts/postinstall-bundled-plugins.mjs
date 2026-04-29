@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { expandPackageDistImportClosure } from "./lib/package-dist-imports.mjs";
 import { resolveNpmRunner } from "./npm-runner.mjs";
 
 export const BUNDLED_PLUGIN_INSTALL_TARGETS = [];
@@ -292,6 +293,16 @@ export function pruneInstalledPackageDist(params = {}) {
     }
   }
   const installedFiles = listInstalledDistFiles(params);
+  const readFile = params.readFileSync ?? readFileSync;
+  expectedFiles = new Set(
+    expandPackageDistImportClosure({
+      files: installedFiles,
+      seedFiles: [...expectedFiles],
+      readText(relativePath) {
+        return readFile(join(packageRoot, relativePath), "utf8");
+      },
+    }),
+  );
   const removed = [];
 
   for (const relativePath of installedFiles) {
@@ -450,6 +461,11 @@ export function createNestedNpmInstallEnv(env = process.env) {
 export function createBundledRuntimeDependencyInstallEnv(env = process.env) {
   return {
     ...createNestedNpmInstallEnv(env),
+    npm_config_dry_run: "false",
+    npm_config_fetch_retries: env.npm_config_fetch_retries ?? "5",
+    npm_config_fetch_retry_maxtimeout: env.npm_config_fetch_retry_maxtimeout ?? "120000",
+    npm_config_fetch_retry_mintimeout: env.npm_config_fetch_retry_mintimeout ?? "10000",
+    npm_config_fetch_timeout: env.npm_config_fetch_timeout ?? "300000",
     npm_config_legacy_peer_deps: "true",
     npm_config_package_lock: "false",
     npm_config_save: "false",
