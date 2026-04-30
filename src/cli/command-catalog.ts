@@ -52,7 +52,7 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
   {
     commandPath: ["agent"],
     policy: {
-      loadPlugins: "text-only",
+      loadPlugins: ({ argv, jsonOutputMode }) => hasFlag(argv, "--local") || !jsonOutputMode,
       networkProxy: ({ argv }) => (hasFlag(argv, "--local") ? "default" : "bypass"),
     },
   },
@@ -210,6 +210,10 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
       networkProxy: "bypass",
     },
     route: { id: "tasks-list" },
+  },
+  {
+    commandPath: ["tools"],
+    policy: { loadPlugins: "never", ensureCliPath: false, networkProxy: "bypass" },
   },
   { commandPath: ["acp"], policy: { networkProxy: "bypass" } },
   { commandPath: ["approvals"], policy: { networkProxy: "bypass" } },
