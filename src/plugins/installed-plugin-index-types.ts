@@ -48,6 +48,13 @@ export type InstalledPluginInstallRecordInfo = Pick<
   | "clawhubPackage"
   | "clawhubFamily"
   | "clawhubChannel"
+  | "storepackSha256"
+  | "storepackSpecVersion"
+  | "storepackManifestSha256"
+  | "storepackSize"
+  | "gitUrl"
+  | "gitRef"
+  | "gitCommit"
   | "marketplaceName"
   | "marketplaceSource"
   | "marketplacePlugin"
@@ -122,4 +129,5 @@ export type LoadInstalledPluginIndexParams = {
 
 export type RefreshInstalledPluginIndexParams = LoadInstalledPluginIndexParams & {
   reason: InstalledPluginIndexRefreshReason;
+  policyPluginIds?: readonly string[];
 };

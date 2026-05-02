@@ -1039,6 +1039,7 @@ describe("active-memory plugin", () => {
       "If memory_recall is unavailable, use memory_search and memory_get.",
     );
     expect(runParams?.toolsAllow).toEqual(["memory_recall", "memory_search", "memory_get"]);
+    expect(runParams?.allowGatewaySubagentBinding).toBe(true);
     expect(runParams?.prompt).toContain(
       "When searching for preference or habit recall, use a permissive recall limit or memory_search threshold before deciding that no useful memory exists.",
     );
@@ -1601,6 +1602,7 @@ describe("active-memory plugin", () => {
 
   it("returns partial transcript text on timeout when the subagent has already written assistant output", async () => {
     __testing.setMinimumTimeoutMsForTests(1);
+    __testing.setSetupGraceTimeoutMsForTests(0);
     api.pluginConfig = {
       agents: ["main"],
       timeoutMs: 20,
@@ -1663,6 +1665,7 @@ describe("active-memory plugin", () => {
 
   it("returns partial transcript text on timeout when transcripts are temporary by default", async () => {
     __testing.setMinimumTimeoutMsForTests(1);
+    __testing.setSetupGraceTimeoutMsForTests(0);
     api.pluginConfig = {
       agents: ["main"],
       timeoutMs: 20,
@@ -1718,6 +1721,7 @@ describe("active-memory plugin", () => {
 
   it("keeps timeout status when the timeout transcript is empty", async () => {
     __testing.setMinimumTimeoutMsForTests(1);
+    __testing.setSetupGraceTimeoutMsForTests(0);
     api.pluginConfig = {
       agents: ["main"],
       timeoutMs: 1,
@@ -1748,6 +1752,7 @@ describe("active-memory plugin", () => {
 
   it("keeps timeout status when the timeout transcript path does not exist", async () => {
     __testing.setMinimumTimeoutMsForTests(1);
+    __testing.setSetupGraceTimeoutMsForTests(0);
     api.pluginConfig = {
       agents: ["main"],
       timeoutMs: 1,
