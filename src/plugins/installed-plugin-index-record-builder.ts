@@ -6,7 +6,7 @@ import { normalizePluginsConfig, resolveEffectiveEnableState } from "./config-st
 import type { PluginCandidate } from "./discovery.js";
 import type { PluginInstallSourceInfo } from "./install-source-info.js";
 import { describePluginInstallSource } from "./install-source-info.js";
-import { hashJson, safeHashFile } from "./installed-plugin-index-hash.js";
+import { hashJson, safeFileSignature, safeHashFile } from "./installed-plugin-index-hash.js";
 import { hasOptionalMissingPluginManifestFile } from "./installed-plugin-index-manifest.js";
 import type {
   InstalledPluginIndexRecord,
@@ -109,9 +109,11 @@ function resolvePackageJsonRecord(params: {
   if (!hash) {
     return undefined;
   }
+  const fileSignature = safeFileSignature(params.packageJsonPath);
   return {
     path: resolvePackageJsonRelativePath(params.candidate.rootDir, params.packageJsonPath),
     hash,
+    ...(fileSignature ? { fileSignature } : {}),
   };
 }
 
@@ -135,19 +137,6 @@ function normalizeStringField(value: unknown): string | undefined {
   return normalized ? normalized : undefined;
 }
 
-function normalizeStringListField(value: unknown): readonly string[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  const normalized = value
-    .flatMap((entry) => {
-      const normalizedEntry = normalizeStringField(entry);
-      return normalizedEntry ? [normalizedEntry] : [];
-    })
-    .filter((entry, index, all) => all.indexOf(entry) === index);
-  return normalized.length > 0 ? normalized : undefined;
-}
-
 function normalizePackageChannel(
   channel: PluginPackageChannel | undefined,
 ): InstalledPluginPackageChannelInfo | undefined {
@@ -155,30 +144,9 @@ function normalizePackageChannel(
   if (!id) {
     return undefined;
   }
-  const label = normalizeStringField(channel?.label);
-  const blurb = normalizeStringField(channel?.blurb);
-  const preferOver = normalizeStringListField(channel?.preferOver);
-  const commands =
-    channel?.commands &&
-    typeof channel.commands === "object" &&
-    !Array.isArray(channel.commands) &&
-    (typeof channel.commands.nativeCommandsAutoEnabled === "boolean" ||
-      typeof channel.commands.nativeSkillsAutoEnabled === "boolean")
-      ? {
-          ...(typeof channel.commands.nativeCommandsAutoEnabled === "boolean"
-            ? { nativeCommandsAutoEnabled: channel.commands.nativeCommandsAutoEnabled }
-            : {}),
-          ...(typeof channel.commands.nativeSkillsAutoEnabled === "boolean"
-            ? { nativeSkillsAutoEnabled: channel.commands.nativeSkillsAutoEnabled }
-            : {}),
-        }
-      : undefined;
   return {
+    ...structuredClone(channel),
     id,
-    ...(label ? { label } : {}),
-    ...(blurb ? { blurb } : {}),
-    ...(preferOver ? { preferOver } : {}),
-    ...(commands ? { commands } : {}),
   };
 }
 
@@ -240,8 +208,13 @@ export function buildInstalledPluginIndexRecords(params: {
     const packageJsonPath = resolvePackageJsonPath(candidate);
     const installRecord = params.installRecords[record.id];
     const packageInstall = describePackageInstallSource(candidate);
-    const packageChannel = normalizePackageChannel(candidate?.packageManifest?.channel);
+    const packageChannel = normalizePackageChannel(
+      record.packageChannel ?? candidate?.packageManifest?.channel,
+    );
     const manifestHash = resolveManifestHash({ record, diagnostics: params.diagnostics });
+    const manifestFile = hasOptionalMissingPluginManifestFile(record)
+      ? undefined
+      : safeFileSignature(record.manifestPath);
     const packageJson = resolvePackageJsonRecord({
       candidate,
       packageJsonPath,
@@ -259,6 +232,7 @@ export function buildInstalledPluginIndexRecords(params: {
       pluginId: record.id,
       manifestPath: record.manifestPath,
       manifestHash,
+      ...(manifestFile ? { manifestFile } : {}),
       source: record.source,
       rootDir: record.rootDir,
       origin: record.origin,

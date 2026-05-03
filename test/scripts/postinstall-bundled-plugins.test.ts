@@ -1,11 +1,15 @@
+import { readFileSync as readFileSyncOriginal } from "node:fs";
 import fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  collectLegacyPluginRuntimeDepsStateRoots,
+  isSourceCheckoutRoot,
   isDirectPostinstallInvocation,
   pruneOpenClawCompileCache,
   pruneInstalledPackageDist,
+  pruneLegacyPluginRuntimeDepsState,
   pruneBundledPluginSourceNodeModules,
   runBundledPluginPostinstall,
   runPluginRegistryPostinstallMigration,
@@ -136,6 +140,24 @@ describe("bundled plugin postinstall", () => {
     );
   });
 
+  it("does not classify published packages with source files as source checkouts", () => {
+    const packageRoot = "/pkg";
+    const existingPaths = new Set([
+      path.join(packageRoot, "package.json"),
+      path.join(packageRoot, "pnpm-workspace.yaml"),
+      path.join(packageRoot, "src"),
+      path.join(packageRoot, "extensions"),
+      path.join(packageRoot, "dist", "postinstall-inventory.json"),
+    ]);
+
+    expect(
+      isSourceCheckoutRoot({
+        packageRoot,
+        existsSync: (value: string) => existingPaths.has(value),
+      }),
+    ).toBe(false);
+  });
+
   it("prunes source-checkout bundled plugin node_modules", async () => {
     const packageRoot = await createTempDirAsync("openclaw-source-checkout-");
     const extensionsDir = path.join(packageRoot, "extensions");
@@ -186,6 +208,25 @@ describe("bundled plugin postinstall", () => {
     expect(warn).toHaveBeenCalledWith(
       "[postinstall] could not prune bundled plugin source node_modules: Error: locked",
     );
+  });
+
+  it("does not prune user-state legacy runtime deps during source-checkout postinstall", async () => {
+    const packageRoot = await createTempDirAsync("openclaw-source-checkout-state-skip-");
+    const home = await createTempDirAsync("openclaw-source-checkout-home-");
+    const legacyRuntimeRoot = path.join(home, ".openclaw", "plugin-runtime-deps");
+    await fs.mkdir(path.join(packageRoot, ".git"), { recursive: true });
+    await fs.mkdir(path.join(packageRoot, "src"), { recursive: true });
+    await fs.mkdir(path.join(packageRoot, "extensions"), { recursive: true });
+    await fs.mkdir(legacyRuntimeRoot, { recursive: true });
+    await fs.writeFile(path.join(legacyRuntimeRoot, "package.json"), "{}\n");
+
+    runBundledPluginPostinstall({
+      env: { HOME: home },
+      packageRoot,
+      log: { log: vi.fn(), warn: vi.fn() },
+    });
+
+    await expect(fs.stat(legacyRuntimeRoot)).resolves.toBeTruthy();
   });
 
   it("honors disable env before source-checkout pruning", async () => {
@@ -353,6 +394,103 @@ describe("bundled plugin postinstall", () => {
     await expect(fs.stat(staleFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("prunes legacy plugin runtime deps state during packaged postinstall", async () => {
+    const packageRoot = await createTempDirAsync("openclaw-packaged-state-cleanup-");
+    const home = await createTempDirAsync("openclaw-packaged-home-");
+    const stateOverride = path.join(home, "custom-state");
+    const systemState = path.join(home, "system-state");
+    const defaultLegacyRoot = path.join(home, ".openclaw", "plugin-runtime-deps");
+    const oldBrandLegacyRoot = path.join(home, ".clawdbot", "plugin-runtime-deps");
+    const overrideLegacyRoot = path.join(stateOverride, "plugin-runtime-deps");
+    const systemLegacyRoot = path.join(systemState, "plugin-runtime-deps");
+    const thirdPartyNodeModules = path.join(
+      home,
+      ".openclaw",
+      "extensions",
+      "lossless-claw",
+      "node_modules",
+    );
+    const currentFile = path.join(packageRoot, "dist", "entry.js");
+
+    await fs.mkdir(path.dirname(currentFile), { recursive: true });
+    await fs.writeFile(currentFile, "export {};\n");
+    await writePackageDistInventory(packageRoot);
+    for (const root of [
+      defaultLegacyRoot,
+      oldBrandLegacyRoot,
+      overrideLegacyRoot,
+      systemLegacyRoot,
+      thirdPartyNodeModules,
+    ]) {
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(path.join(root, "package.json"), "{}\n");
+    }
+
+    const log = { log: vi.fn(), warn: vi.fn() };
+    runBundledPluginPostinstall({
+      env: {
+        HOME: home,
+        OPENCLAW_STATE_DIR: stateOverride,
+        STATE_DIRECTORY: systemState,
+      },
+      packageRoot,
+      log,
+    });
+
+    await expect(fs.stat(defaultLegacyRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(oldBrandLegacyRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(overrideLegacyRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(systemLegacyRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(thirdPartyNodeModules)).resolves.toBeTruthy();
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.log).toHaveBeenCalledWith(
+      expect.stringContaining("[postinstall] pruned legacy plugin runtime deps:"),
+    );
+  });
+
+  it("keeps legacy plugin runtime deps cleanup non-fatal", () => {
+    const warn = vi.fn();
+
+    expect(() =>
+      pruneLegacyPluginRuntimeDepsState({
+        env: { HOME: "/home/alice" },
+        existsSync: vi.fn(() => true),
+        rmSync: vi.fn(() => {
+          throw new Error("locked");
+        }),
+        log: { log: vi.fn(), warn },
+        homedir: () => "/home/alice",
+      }),
+    ).not.toThrow();
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[postinstall] could not prune legacy plugin runtime deps /home/alice/.openclaw/plugin-runtime-deps: Error: locked",
+      ),
+    );
+  });
+
+  it("resolves legacy plugin runtime deps roots from OpenClaw state env", () => {
+    expect(
+      collectLegacyPluginRuntimeDepsStateRoots({
+        env: {
+          HOME: "/users/alice",
+          OPENCLAW_HOME: "/srv/openclaw-home",
+          OPENCLAW_CONFIG_PATH: "~/profile/openclaw.json",
+          OPENCLAW_STATE_DIR: "~/state",
+          STATE_DIRECTORY: "/var/lib/openclaw",
+        },
+        homedir: () => "/users/alice",
+      }),
+    ).toEqual([
+      "/srv/openclaw-home/.clawdbot/plugin-runtime-deps",
+      "/srv/openclaw-home/.openclaw/plugin-runtime-deps",
+      "/srv/openclaw-home/profile/plugin-runtime-deps",
+      "/srv/openclaw-home/state/plugin-runtime-deps",
+      "/var/lib/openclaw/plugin-runtime-deps",
+    ]);
+  });
+
   it("keeps imported dist chunks even when inventory is stale", async () => {
     const packageRoot = await createTempDirAsync("openclaw-packaged-install-import-");
     const entryFile = path.join(packageRoot, "dist", "cli", "run-main.js");
@@ -372,6 +510,34 @@ describe("bundled plugin postinstall", () => {
     ).toEqual(["dist/memory-state-old.js"]);
 
     await expect(fs.stat(importedChunk)).resolves.toBeTruthy();
+    await expect(fs.stat(staleFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not abort dist pruning when a listed chunk disappears before import expansion", async () => {
+    const packageRoot = await createTempDirAsync("openclaw-packaged-install-missing-chunk-");
+    const entryFile = path.join(packageRoot, "dist", "control-ui", "assets", "instances.js");
+    const staleFile = path.join(packageRoot, "dist", "stale.js");
+    await fs.mkdir(path.dirname(entryFile), { recursive: true });
+    await fs.writeFile(entryFile, 'import "./chunk.js";\n');
+    await writePackageDistInventory(packageRoot);
+    await fs.writeFile(staleFile, "export {};\n");
+    const readFileSync = vi.fn((filePath: string | Buffer | URL, options?: BufferEncoding) => {
+      if (String(filePath).endsWith("dist/control-ui/assets/instances.js")) {
+        const error = new Error("missing generated asset") as NodeJS.ErrnoException;
+        error.code = "ENOENT";
+        throw error;
+      }
+      return readFileSyncOriginal(filePath, options);
+    });
+
+    expect(() =>
+      pruneInstalledPackageDist({
+        packageRoot,
+        readFileSync,
+        log: { log: vi.fn(), warn: vi.fn() },
+      }),
+    ).not.toThrow();
+
     await expect(fs.stat(staleFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 

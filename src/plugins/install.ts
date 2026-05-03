@@ -12,12 +12,12 @@ import {
   isPrereleaseResolutionAllowed,
   parseRegistryNpmSpec,
 } from "../infra/npm-registry-spec.js";
-import { resolveOpenClawPackageRootSync } from "../infra/openclaw-root.js";
 import {
   createSafeNpmInstallArgs,
   createSafeNpmInstallEnv,
 } from "../infra/safe-package-install.js";
 import { runCommandWithTimeout } from "../process/exec.js";
+import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { resolveUserPath } from "../utils.js";
 import {
@@ -35,14 +35,14 @@ import {
   type PackageManifest as PluginPackageManifest,
 } from "./manifest.js";
 import { validatePackageExtensionEntriesForInstall } from "./package-entry-resolution.js";
+import { linkOpenClawPeerDependencies } from "./plugin-peer-link.js";
 
 export { resolvePluginInstallDir } from "./install-paths.js";
 
-let pluginInstallRuntimePromise: Promise<typeof import("./install.runtime.js")> | undefined;
+const pluginInstallRuntimeLoader = createLazyImportLoader(() => import("./install.runtime.js"));
 
 async function loadPluginInstallRuntime() {
-  pluginInstallRuntimePromise ??= import("./install.runtime.js");
-  return pluginInstallRuntimePromise;
+  return await pluginInstallRuntimeLoader.load();
 }
 
 type PluginInstallLogger = {
@@ -110,6 +110,7 @@ type PluginInstallPolicyRequest = {
 };
 
 const defaultLogger: PluginInstallLogger = {};
+const TRUSTED_OFFICIAL_NPM_PLUGIN_PACKAGES = new Map([["@openclaw/codex", "codex"]]);
 
 function ensureOpenClawExtensions(params: { manifest: PackageManifest }):
   | {
@@ -178,6 +179,33 @@ function buildDirectoryInstallResult(params: {
   };
 }
 
+function hasPackageRuntimeDependencies(manifest: PackageManifest): boolean {
+  return (
+    Object.keys(manifest.dependencies ?? {}).length > 0 ||
+    Object.keys(manifest.optionalDependencies ?? {}).length > 0
+  );
+}
+
+function isTrustedOfficialNpmPluginInstall(params: {
+  installPolicyRequest?: PluginInstallPolicyRequest;
+  packageName: string;
+  pluginId: string;
+}): boolean {
+  if (params.installPolicyRequest?.kind !== "plugin-npm") {
+    return false;
+  }
+  const requested = parseRegistryNpmSpec(params.installPolicyRequest.requestedSpecifier ?? "");
+  if (!requested) {
+    return false;
+  }
+  const expectedPluginId = TRUSTED_OFFICIAL_NPM_PLUGIN_PACKAGES.get(requested.name);
+  return (
+    expectedPluginId !== undefined &&
+    params.packageName === requested.name &&
+    params.pluginId === expectedPluginId
+  );
+}
+
 function buildBlockedInstallResult(params: {
   blocked: NonNullable<NonNullable<InstallSecurityScanResult>["blocked"]>;
 }): Extract<InstallPluginResult, { ok: false }> {
@@ -207,6 +235,7 @@ type PackageInstallCommonParams = InstallSafetyOverrides & {
 type FileInstallCommonParams = Pick<
   PackageInstallCommonParams,
   | "dangerouslyForceUnsafeInstall"
+  | "trustedSourceLinkedOfficialInstall"
   | "extensionsDir"
   | "logger"
   | "mode"
@@ -219,6 +248,7 @@ function pickPackageInstallCommonParams(
 ): PackageInstallCommonParams {
   return {
     dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
+    trustedSourceLinkedOfficialInstall: params.trustedSourceLinkedOfficialInstall,
     extensionsDir: params.extensionsDir,
     npmDir: params.npmDir,
     timeoutMs: params.timeoutMs,
@@ -552,56 +582,13 @@ async function detectNativePackageInstallSource(packageDir: string): Promise<boo
   }
 }
 
-/**
- * After the installed package tree has been scanned, symlink the host openclaw
- * package for plugins that declare it as a peer dependency.
- */
-async function linkOpenClawPeerDependencies(params: {
-  installedDir: string;
-  peerDependencies: Record<string, string>;
-  logger: PluginInstallLogger;
-}): Promise<void> {
-  const peers = Object.keys(params.peerDependencies).filter((name) => name === "openclaw");
-  if (peers.length === 0) {
-    return;
-  }
-
-  const hostRoot = resolveOpenClawPackageRootSync({
-    argv1: process.argv[1],
-    moduleUrl: import.meta.url,
-    cwd: process.cwd(),
-  });
-  if (!hostRoot) {
-    params.logger.warn?.(
-      "Could not locate openclaw package root to symlink peerDependencies; plugin may fail to resolve openclaw at runtime.",
-    );
-    return;
-  }
-
-  const nodeModulesDir = path.join(params.installedDir, "node_modules");
-  await fs.mkdir(nodeModulesDir, { recursive: true });
-
-  for (const peerName of peers) {
-    const linkPath = path.join(nodeModulesDir, peerName);
-
-    try {
-      // Remove any existing entry (broken link or stale directory) before
-      // creating the new symlink so re-installs are idempotent.
-      await fs.rm(linkPath, { recursive: true, force: true });
-      await fs.symlink(hostRoot, linkPath, "junction");
-      params.logger.info?.(`Linked peerDependency "${peerName}" -> ${hostRoot}`);
-    } catch (err) {
-      params.logger.warn?.(`Failed to symlink peerDependency "${peerName}": ${String(err)}`);
-    }
-  }
-}
-
 type ValidatedPackagePlugin = {
   manifest: PackageManifest;
   pluginId: string;
   manifestName?: string;
   version?: string;
   extensions: string[];
+  hasRuntimeDependencies: boolean;
   peerDependencies: Record<string, string>;
 };
 
@@ -611,6 +598,7 @@ async function validatePackagePluginInstallSource(params: {
   expectedPluginId?: string;
   requirePluginManifest?: boolean;
   dangerouslyForceUnsafeInstall?: boolean;
+  trustedSourceLinkedOfficialInstall?: boolean;
   installPolicyRequest?: PluginInstallPolicyRequest;
   logger: PluginInstallLogger;
   mode: "install" | "update";
@@ -730,11 +718,19 @@ async function validatePackagePluginInstallSource(params: {
   const scanMode = params.resolveEffectiveMode
     ? await params.resolveEffectiveMode(pluginId)
     : params.mode;
+  const trustedOfficialInstall =
+    params.trustedSourceLinkedOfficialInstall ||
+    isTrustedOfficialNpmPluginInstall({
+      installPolicyRequest: params.installPolicyRequest,
+      packageName: pkgName,
+      pluginId,
+    });
   const scanResult = await runInstallSourceScan({
     subject: `Plugin "${pluginId}"`,
     scan: async () =>
       await params.runtime.scanPackageInstallSource({
         dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
+        trustedSourceLinkedOfficialInstall: trustedOfficialInstall,
         packageDir: params.packageDir,
         pluginId,
         logger: params.logger,
@@ -759,6 +755,7 @@ async function validatePackagePluginInstallSource(params: {
       manifestName: pkgName || undefined,
       version: typeof manifest.version === "string" ? manifest.version : undefined,
       extensions,
+      hasRuntimeDependencies: hasPackageRuntimeDependencies(manifest),
       peerDependencies: manifest.peerDependencies ?? {},
     },
   };
@@ -806,6 +803,7 @@ export async function installPluginFromInstalledPackageDir(
     expectedPluginId: params.expectedPluginId,
     requirePluginManifest: params.requirePluginManifest,
     dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
+    trustedSourceLinkedOfficialInstall: params.trustedSourceLinkedOfficialInstall,
     installPolicyRequest: params.installPolicyRequest,
     logger,
     mode: params.mode ?? "install",
@@ -867,6 +865,7 @@ async function installPluginFromPackageDir(
     expectedPluginId: params.expectedPluginId,
     requirePluginManifest: params.requirePluginManifest,
     dangerouslyForceUnsafeInstall: params.dangerouslyForceUnsafeInstall,
+    trustedSourceLinkedOfficialInstall: params.trustedSourceLinkedOfficialInstall,
     installPolicyRequest: params.installPolicyRequest,
     logger,
     mode,
@@ -879,6 +878,7 @@ async function installPluginFromPackageDir(
   const { plugin } = validated;
 
   preparedTarget = await resolvePreparedTargetForPluginId(plugin.pluginId);
+  const hasBundleManifest = Boolean(runtime.detectBundleManifestFormat(params.packageDir));
 
   return await installPluginDirectoryIntoExtensions({
     sourceDir: params.packageDir,
@@ -893,8 +893,11 @@ async function installPluginFromPackageDir(
     mode: preparedTarget.effectiveMode,
     dryRun,
     copyErrorPrefix: "failed to copy plugin",
-    hasDeps: false,
-    depsLogMessage: "",
+    hasDeps:
+      plugin.hasRuntimeDependencies &&
+      !hasBundleManifest &&
+      params.installPolicyRequest?.kind === "plugin-archive",
+    depsLogMessage: "Installing plugin dependencies…",
     nameEncoder: encodePluginInstallDirName,
     afterInstall: async (installedDir) => {
       return await scanAndLinkInstalledPackage({
@@ -944,6 +947,7 @@ export async function installPluginFromArchive(
           mode,
           dryRun: params.dryRun,
           expectedPluginId: params.expectedPluginId,
+          trustedSourceLinkedOfficialInstall: params.trustedSourceLinkedOfficialInstall,
           requirePluginManifest: true,
           installPolicyRequest,
         }),

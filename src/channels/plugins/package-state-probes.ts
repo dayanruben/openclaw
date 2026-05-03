@@ -5,6 +5,10 @@ import {
   listChannelCatalogEntries,
   type PluginChannelCatalogEntry,
 } from "../../plugins/channel-catalog-registry.js";
+import {
+  getCachedPluginModuleLoader,
+  type PluginModuleLoaderCache,
+} from "../../plugins/plugin-module-loader-cache.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { loadChannelPluginModule, resolveExistingPluginModulePath } from "./module-loader.js";
 
@@ -25,6 +29,29 @@ type ChannelPackageStateMetadata = {
 export type ChannelPackageStateMetadataKey = "configuredState" | "persistedAuthState";
 
 const log = createSubsystemLogger("channels");
+const sourcePackageStateLoaderCache: PluginModuleLoaderCache = new Map();
+
+function isSourceModulePath(modulePath: string): boolean {
+  return /\.(?:c|m)?tsx?$/iu.test(modulePath);
+}
+
+function loadChannelPackageStateModule(params: { modulePath: string; rootDir: string }): unknown {
+  try {
+    return loadChannelPluginModule(params);
+  } catch (error) {
+    if (!isSourceModulePath(params.modulePath)) {
+      throw error;
+    }
+    const loader = getCachedPluginModuleLoader({
+      cache: sourcePackageStateLoaderCache,
+      modulePath: params.modulePath,
+      importerUrl: import.meta.url,
+      tryNative: true,
+      cacheScopeKey: "channel-package-state",
+    });
+    return loader(params.modulePath);
+  }
+}
 
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) {
@@ -49,9 +76,9 @@ function resolveChannelPackageStateMetadata(
   }
   const specifier = normalizeOptionalString(metadata.specifier) ?? "";
   const exportName = normalizeOptionalString(metadata.exportName) ?? "";
-  const metadataWithEnv = metadata as ChannelPackageStateMetadata;
-  const allOf = normalizeStringList(metadataWithEnv.env?.allOf);
-  const anyOf = normalizeStringList(metadataWithEnv.env?.anyOf);
+  const envMetadata = "env" in metadata ? metadata.env : undefined;
+  const allOf = normalizeStringList(envMetadata?.allOf);
+  const anyOf = normalizeStringList(envMetadata?.anyOf);
   const env = allOf.length > 0 || anyOf.length > 0 ? { allOf, anyOf } : undefined;
   if ((!specifier || !exportName) && !env) {
     return null;
@@ -92,7 +119,7 @@ function resolveChannelPackageStateChecker(params: {
   }
 
   try {
-    const moduleExport = loadChannelPluginModule({
+    const moduleExport = loadChannelPackageStateModule({
       modulePath: resolveExistingPluginModulePath(params.entry.rootDir, metadata.specifier!),
       rootDir: params.entry.rootDir,
     }) as Record<string, unknown>;
