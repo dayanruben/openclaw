@@ -737,6 +737,7 @@ async function runUpgradeLane(params) {
         env,
         packageSpec: params.baselineSpec,
         logPath: join(params.logsDir, "upgrade-install-baseline.log"),
+        ignoreScripts: true,
       });
     } else {
       await installTarballPackage({
@@ -744,6 +745,7 @@ async function runUpgradeLane(params) {
         env,
         tgzPath: params.baselineTgz,
         logPath: join(params.logsDir, "upgrade-install-baseline.log"),
+        ignoreScripts: true,
         restoreBundledPluginPostinstall: false,
       });
     }
@@ -777,9 +779,19 @@ async function runUpgradeLane(params) {
       timeoutMs: updateTimeoutMs(),
       check: false,
     });
-    verifyPackagedUpgradeUpdateResult(updateResult, {
-      candidateVersion: params.build.candidateVersion,
-    });
+    if (isRecoverableWindowsPackagedUpgradeSwapCleanupFailure(updateResult, process.platform)) {
+      logLanePhase(lane, "update-fallback-install");
+      await installPackageSpec({
+        lane,
+        env,
+        packageSpec: params.candidateUrl,
+        logPath: join(params.logsDir, "upgrade-update-fallback-install.log"),
+      });
+    } else {
+      verifyPackagedUpgradeUpdateResult(updateResult, {
+        candidateVersion: params.build.candidateVersion,
+      });
+    }
 
     logLanePhase(lane, "update-status");
     await runOpenClaw({
@@ -1318,6 +1330,23 @@ export function verifyPackagedUpgradeUpdateResult(result, _options) {
     `Packaged upgrade failed (${result.exitCode}): ${trimForSummary(
       `${result.stdout}\n${result.stderr}`,
     )}`,
+  );
+}
+
+export function isRecoverableWindowsPackagedUpgradeSwapCleanupFailure(
+  result,
+  platform = process.platform,
+) {
+  if (platform !== "win32" || result.exitCode === 0) {
+    return false;
+  }
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  return (
+    /\bglobal install swap\b/iu.test(output) &&
+    /\bEPERM\b/iu.test(output) &&
+    /\bunlink\b/iu.test(output) &&
+    /[/\\]\.openclaw-\d+-\d+[/\\]/u.test(output) &&
+    /\.node['"]?/iu.test(output)
   );
 }
 
@@ -2316,6 +2345,7 @@ async function installTarballPackage(params) {
     packageSpec: params.tgzPath,
     logPath: params.logPath,
     timeoutMs: params.timeoutMs,
+    ignoreScripts: params.ignoreScripts,
   });
   if (
     params.restoreBundledPluginPostinstall !== false &&
@@ -2339,15 +2369,7 @@ async function installPackageSpec(params) {
   rmSync(installedPackageRoot(params.lane.prefixDir), { force: true, recursive: true });
   await runCommand(
     npmCommand(),
-    [
-      "install",
-      "-g",
-      params.packageSpec,
-      "--omit=dev",
-      "--no-fund",
-      "--no-audit",
-      "--loglevel=notice",
-    ],
+    buildNpmGlobalInstallArgs(params.packageSpec, { ignoreScripts: params.ignoreScripts }),
     {
       cwd: params.lane.homeDir,
       env: installEnv,
@@ -2355,6 +2377,19 @@ async function installPackageSpec(params) {
       timeoutMs: params.timeoutMs ?? installTimeoutMs(),
     },
   );
+}
+
+export function buildNpmGlobalInstallArgs(packageSpec, options = {}) {
+  return [
+    "install",
+    "-g",
+    packageSpec,
+    "--omit=dev",
+    "--no-fund",
+    "--no-audit",
+    ...(options.ignoreScripts ? ["--ignore-scripts"] : []),
+    "--loglevel=notice",
+  ];
 }
 
 function installTimeoutMs() {
