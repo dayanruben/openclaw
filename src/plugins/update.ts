@@ -11,6 +11,7 @@ import {
 } from "../infra/npm-registry-spec.js";
 import {
   expectedIntegrityForUpdate,
+  installedPackageNeedsOpenClawPeerLinkRepair,
   readInstalledPackageVersion,
 } from "../infra/package-update-utils.js";
 import { compareComparableSemver, parseComparableSemver } from "../infra/semver-compare.js";
@@ -30,6 +31,10 @@ import {
   type ExternalizedBundledPluginBridge,
 } from "./externalized-bundled-plugins.js";
 import { installPluginFromGitSpec } from "./git-install.js";
+import {
+  resolveClawHubInstallSpecsForUpdateChannel,
+  resolveNpmInstallSpecsForUpdateChannel,
+} from "./install-channel-specs.js";
 import {
   installPluginFromNpmSpec,
   PLUGIN_INSTALL_ERROR_CODE,
@@ -458,20 +463,6 @@ function npmUpdateFailureSpec(params: {
   return params.effectiveSpec ?? params.fallbackSpec ?? "unknown";
 }
 
-function isDefaultNpmSpecForBetaUpdate(spec: string): { name: string } | null {
-  const parsed = parseRegistryNpmSpec(spec);
-  if (!parsed) {
-    return null;
-  }
-  if (parsed.selectorKind === "none") {
-    return { name: parsed.name };
-  }
-  if (parsed.selectorKind === "tag" && parsed.selector?.toLowerCase() === "latest") {
-    return { name: parsed.name };
-  }
-  return null;
-}
-
 function resolveNpmSpecPackageName(spec: string | undefined): string | undefined {
   return spec ? parseRegistryNpmSpec(spec)?.name : undefined;
 }
@@ -562,36 +553,16 @@ function resolveNpmUpdateSpecs(params: {
   if (!recordSpec) {
     return {};
   }
-  if (params.specOverride || params.updateChannel !== "beta") {
+  if (params.specOverride) {
     return {
       installSpec: recordSpec,
       recordSpec,
     };
   }
-  const betaTarget = isDefaultNpmSpecForBetaUpdate(recordSpec);
-  if (!betaTarget) {
-    return {
-      installSpec: recordSpec,
-      recordSpec,
-    };
-  }
-  return {
-    installSpec: `${betaTarget.name}@beta`,
-    recordSpec,
-    fallbackSpec: recordSpec,
-    fallbackLabel: `${betaTarget.name}@beta`,
-  };
-}
-
-function isDefaultClawHubSpecForBetaUpdate(spec: string): { name: string } | null {
-  const parsed = parseClawHubPluginSpec(spec);
-  if (!parsed) {
-    return null;
-  }
-  if (!parsed.version || parsed.version.toLowerCase() === "latest") {
-    return { name: parsed.name };
-  }
-  return null;
+  return resolveNpmInstallSpecsForUpdateChannel({
+    spec: recordSpec,
+    updateChannel: params.updateChannel,
+  });
 }
 
 function resolveClawHubUpdateSpecs(params: {
@@ -607,25 +578,10 @@ function resolveClawHubUpdateSpecs(params: {
     return {};
   }
   const recordSpec = params.record.spec ?? `clawhub:${params.record.clawhubPackage}`;
-  if (params.updateChannel !== "beta") {
-    return {
-      installSpec: recordSpec,
-      recordSpec,
-    };
-  }
-  const betaTarget = isDefaultClawHubSpecForBetaUpdate(recordSpec);
-  if (!betaTarget) {
-    return {
-      installSpec: recordSpec,
-      recordSpec,
-    };
-  }
-  return {
-    installSpec: `clawhub:${betaTarget.name}@beta`,
-    recordSpec,
-    fallbackSpec: recordSpec,
-    fallbackLabel: `clawhub:${betaTarget.name}@beta`,
-  };
+  return resolveClawHubInstallSpecsForUpdateChannel({
+    spec: recordSpec,
+    updateChannel: params.updateChannel,
+  });
 }
 
 function isBridgeAlreadyInstalledFromPreferredSource(params: {
@@ -971,7 +927,16 @@ export async function updateNpmInstalledPlugins(params: {
       recordFailure(pluginId, `Invalid install path for "${pluginId}": ${String(err)}`);
       continue;
     }
-    const currentVersion = await readInstalledPackageVersion(installPath);
+    let currentVersion: string | undefined;
+    try {
+      currentVersion = await readInstalledPackageVersion(installPath);
+    } catch (err) {
+      recordFailure(
+        pluginId,
+        `Failed to inspect installed package for ${pluginId}: ${String(err)}`,
+      );
+      continue;
+    }
     const extensionsDir = resolveRecordedExtensionsDir({
       pluginId,
       installPath,
@@ -989,6 +954,7 @@ export async function updateNpmInstalledPlugins(params: {
             spec: effectiveSpec!,
             trustedSourceLinkedOfficialInstall,
           }) &&
+          !installedPackageNeedsOpenClawPeerLinkRepair(installPath) &&
           shouldSkipUnchangedNpmInstall({
             currentVersion,
             record,

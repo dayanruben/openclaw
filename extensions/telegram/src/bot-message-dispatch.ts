@@ -28,6 +28,7 @@ import {
   createOutboundPayloadPlan,
   projectOutboundPayloadPlanForDelivery,
 } from "openclaw/plugin-sdk/outbound-runtime";
+import { chunkMarkdownTextWithMode } from "openclaw/plugin-sdk/reply-chunking";
 import { clearHistoryEntriesIfEnabled } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
@@ -75,7 +76,7 @@ import {
   shouldSuppressTelegramError,
 } from "./error-policy.js";
 import { shouldSuppressLocalTelegramExecApprovalPrompt } from "./exec-approvals.js";
-import { renderTelegramHtmlText } from "./format.js";
+import { markdownToTelegramChunks, renderTelegramHtmlText } from "./format.js";
 import {
   type ArchivedPreview,
   createLaneDeliveryStateTracker,
@@ -554,6 +555,7 @@ export const dispatchTelegramMessage = async ({
   let splitReasoningOnNextStream = false;
   let skipNextAnswerMessageStartRotation = false;
   let pendingCompactionReplayBoundary = false;
+  let discardAnswerPreviewOnNextRotation = false;
   let draftLaneEventQueue = Promise.resolve();
   const reasoningStepState = createTelegramReasoningStepState();
   const enqueueDraftLaneEvent = (task: () => Promise<void>): Promise<void> => {
@@ -599,6 +601,7 @@ export const dispatchTelegramMessage = async ({
       const materializedId = await answerLane.stream?.materialize?.();
       const previewMessageId = materializedId ?? answerLane.stream?.messageId();
       if (
+        !discardAnswerPreviewOnNextRotation &&
         typeof previewMessageId === "number" &&
         activePreviewLifecycleByLane.answer === "transient"
       ) {
@@ -612,6 +615,7 @@ export const dispatchTelegramMessage = async ({
       answerLane.stream?.forceNewMessage();
       didForceNewMessage = true;
     }
+    discardAnswerPreviewOnNextRotation = false;
     resetDraftLaneState(answerLane);
     answerLaneHasAssistantContent = false;
     if (didForceNewMessage) {
@@ -784,6 +788,27 @@ export const dispatchTelegramMessage = async ({
       }
       return { ...payload, text };
     };
+    const applyTextToFollowUpPayload = (payload: ReplyPayload, text: string): ReplyPayload => {
+      const next = applyTextToPayload(payload, text);
+      const {
+        replyToId: _replyToId,
+        replyToCurrent: _replyToCurrent,
+        replyToTag: _replyToTag,
+        ...followUp
+      } = next;
+      return followUp;
+    };
+    const splitFinalTextForPreview = (text: string): string[] => {
+      const markdownChunks =
+        chunkMode === "newline"
+          ? chunkMarkdownTextWithMode(text, draftMaxChars, chunkMode)
+          : [text];
+      return markdownChunks.flatMap((chunk) =>
+        markdownToTelegramChunks(chunk, draftMaxChars, { tableMode }).map(
+          (telegramChunk) => telegramChunk.text,
+        ),
+      );
+    };
     const applyQuoteReplyTarget = (payload: ReplyPayload): ReplyPayload => {
       if (
         !implicitQuoteReplyTargetId ||
@@ -836,6 +861,8 @@ export const dispatchTelegramMessage = async ({
       retainPreviewOnCleanupByLane,
       draftMaxChars,
       applyTextToPayload,
+      applyTextToFollowUpPayload,
+      splitFinalTextForPreview,
       sendPayload,
       flushDraftLane,
       stopDraftLane: async (lane) => {
@@ -943,11 +970,12 @@ export const dispatchTelegramMessage = async ({
                     if (isDispatchSuperseded()) {
                       return;
                     }
-                    const clearPendingCompactionReplayBoundaryOnVisibleBoundary = (
-                      didDeliver: boolean,
-                    ) => {
+                    const markVisibleNonPreviewBoundary = (didDeliver: boolean) => {
                       if (didDeliver && info.kind !== "final") {
                         pendingCompactionReplayBoundary = false;
+                        if (answerLane.hasStreamedMessage) {
+                          discardAnswerPreviewOnNextRotation = true;
+                        }
                       }
                     };
                     if (payload.isError === true) {
@@ -1023,6 +1051,8 @@ export const dispatchTelegramMessage = async ({
                       });
                       if (info.kind === "final") {
                         emitPreviewFinalizedHook(result);
+                      } else if (segment.lane === "answer" && result.kind === "sent") {
+                        markVisibleNonPreviewBoundary(true);
                       }
                       if (segment.lane === "reasoning") {
                         if (result.kind !== "skipped") {
@@ -1045,7 +1075,7 @@ export const dispatchTelegramMessage = async ({
                       if (reply.hasMedia) {
                         const payloadWithoutSuppressedReasoning =
                           typeof payload.text === "string" ? { ...payload, text: "" } : payload;
-                        clearPendingCompactionReplayBoundaryOnVisibleBoundary(
+                        markVisibleNonPreviewBoundary(
                           await sendPayload(payloadWithoutSuppressedReasoning),
                         );
                       }
@@ -1069,9 +1099,7 @@ export const dispatchTelegramMessage = async ({
                       }
                       return;
                     }
-                    clearPendingCompactionReplayBoundaryOnVisibleBoundary(
-                      await sendPayload(payload),
-                    );
+                    markVisibleNonPreviewBoundary(await sendPayload(payload));
                     if (info.kind === "final") {
                       await flushBufferedFinalAnswer();
                       pendingCompactionReplayBoundary = false;
