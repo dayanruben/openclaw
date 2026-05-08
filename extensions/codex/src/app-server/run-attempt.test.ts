@@ -19,6 +19,7 @@ import {
 import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CODEX_GPT5_BEHAVIOR_CONTRACT } from "../../prompt-overlay.js";
+import { CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE } from "./dynamic-tools.js";
 import * as elicitationBridge from "./elicitation-bridge.js";
 import type { CodexServerNotification } from "./protocol.js";
 import { rememberCodexRateLimits, resetCodexRateLimitCacheForTests } from "./rate-limit-cache.js";
@@ -208,7 +209,7 @@ function createAppServerHarness(
   return {
     request,
     requests,
-    async waitForMethod(method: string) {
+    async waitForMethod(method: string, timeoutMs = 30_000) {
       await vi.waitFor(
         () => {
           if (!requests.some((entry) => entry.method === method)) {
@@ -220,7 +221,7 @@ function createAppServerHarness(
             );
           }
         },
-        { interval: 1, timeout: 30_000 },
+        { interval: 1, timeout: timeoutMs },
       );
     },
     async notify(notification: CodexServerNotification) {
@@ -316,6 +317,7 @@ function createThreadLifecycleAppServerOptions(): Parameters<
       headers: {},
     },
     requestTimeoutMs: 60_000,
+    turnCompletionIdleTimeoutMs: 60_000,
     approvalPolicy: "never",
     approvalsReviewer: "user",
     sandbox: "workspace-write",
@@ -355,6 +357,22 @@ function createNamedDynamicTool(
       additionalProperties: false,
     },
   };
+}
+
+function createRuntimeDynamicTool(name: string) {
+  return {
+    name,
+    description: `${name} test tool`,
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    execute: vi.fn(async () => ({
+      content: [{ type: "text" as const, text: `${name} done` }],
+      details: {},
+    })),
+  } as never;
 }
 
 type AppServerRequestHandler = (request: {
@@ -503,6 +521,16 @@ describe("runCodexAppServerAttempt", () => {
     );
   });
 
+  it("normalizes Codex dynamic toolsAllow entries before filtering", () => {
+    const tools = ["exec", "apply_patch", "read", "message"].map((name) => ({ name }));
+
+    expect(
+      __testing
+        .filterCodexDynamicToolsForAllowlist(tools, [" BASH ", "apply-patch", "READ"])
+        .map((tool) => tool.name),
+    ).toEqual(["exec", "apply_patch", "read"]);
+  });
+
   it("forces the message dynamic tool for message-tool-only source replies", () => {
     const workspaceDir = path.join(tempDir, "workspace");
     const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
@@ -512,6 +540,50 @@ describe("runCodexAppServerAttempt", () => {
 
     params.sourceReplyDeliveryMode = "automatic";
     expect(__testing.shouldForceMessageTool(params)).toBe(false);
+  });
+
+  it("starts Codex threads with searchable OpenClaw dynamic tools by default", async () => {
+    __testing.setOpenClawCodingToolsFactoryForTests(() => [
+      createRuntimeDynamicTool("message"),
+      createRuntimeDynamicTool("web_search"),
+      createRuntimeDynamicTool("heartbeat_respond"),
+    ]);
+    const harness = createStartedThreadHarness();
+    const params = createParams(
+      path.join(tempDir, "session.jsonl"),
+      path.join(tempDir, "workspace"),
+    );
+    params.disableTools = false;
+    params.sourceReplyDeliveryMode = "message_tool_only";
+    params.toolsAllow = ["message", "web_search", "heartbeat_respond"];
+
+    const run = runCodexAppServerAttempt(params);
+    await harness.waitForMethod("turn/start", 60_000);
+    await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+    await run;
+
+    const startRequest = harness.requests.find((entry) => entry.method === "thread/start");
+    const dynamicTools =
+      (startRequest?.params as { dynamicTools?: Array<Record<string, unknown>> } | undefined)
+        ?.dynamicTools ?? [];
+    const message = dynamicTools.find((tool) => tool.name === "message");
+    const webSearch = dynamicTools.find((tool) => tool.name === "web_search");
+    const heartbeat = dynamicTools.find((tool) => tool.name === "heartbeat_respond");
+
+    expect(message).not.toHaveProperty("namespace");
+    expect(message).not.toHaveProperty("deferLoading");
+    expect(webSearch).toEqual(
+      expect.objectContaining({
+        namespace: CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE,
+        deferLoading: true,
+      }),
+    );
+    expect(heartbeat).toEqual(
+      expect.objectContaining({
+        namespace: CODEX_OPENCLAW_DYNAMIC_TOOL_NAMESPACE,
+        deferLoading: true,
+      }),
+    );
   });
 
   it("passes the live run session key to Codex dynamic tools when sandbox policy uses another key", () => {
@@ -742,7 +814,9 @@ describe("runCodexAppServerAttempt", () => {
     );
     params.timeoutMs = 60_000;
 
-    const run = runCodexAppServerAttempt(params, { turnCompletionIdleTimeoutMs: 5 });
+    const run = runCodexAppServerAttempt(params, {
+      pluginConfig: { appServer: { turnCompletionIdleTimeoutMs: 5 } },
+    });
     await vi.waitFor(() => expect(handleRequest).toBeTypeOf("function"), { interval: 1 });
 
     await expect(
@@ -784,6 +858,199 @@ describe("runCodexAppServerAttempt", () => {
       { interval: 1 },
     );
     expect(queueAgentHarnessMessage("session-1", "after timeout")).toBe(false);
+  });
+
+  it("keeps waiting when Codex emits a raw assistant item after a dynamic tool response", async () => {
+    let notify: (notification: CodexServerNotification) => Promise<void> = async () => undefined;
+    let handleRequest:
+      | ((request: { id: string; method: string; params?: unknown }) => Promise<unknown>)
+      | undefined;
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/start") {
+        return threadStartResult("thread-1");
+      }
+      if (method === "turn/start") {
+        return turnStartResult("turn-1", "inProgress");
+      }
+      return {};
+    });
+    __testing.setCodexAppServerClientFactoryForTests(
+      async () =>
+        ({
+          request,
+          addNotificationHandler: (handler: typeof notify) => {
+            notify = handler;
+            return () => undefined;
+          },
+          addRequestHandler: (
+            handler: (request: {
+              id: string;
+              method: string;
+              params?: unknown;
+            }) => Promise<unknown>,
+          ) => {
+            handleRequest = handler;
+            return () => undefined;
+          },
+        }) as never,
+    );
+    const params = createParams(
+      path.join(tempDir, "session.jsonl"),
+      path.join(tempDir, "workspace"),
+    );
+    params.timeoutMs = 60_000;
+
+    const run = runCodexAppServerAttempt(params, {
+      turnCompletionIdleTimeoutMs: 5,
+      turnTerminalIdleTimeoutMs: 200,
+    });
+    await vi.waitFor(() => expect(handleRequest).toBeTypeOf("function"), { interval: 1 });
+
+    await expect(
+      handleRequest?.({
+        id: "request-tool-1",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "call-1",
+          namespace: null,
+          tool: "message",
+          arguments: { action: "send", text: "already sent" },
+        },
+      }),
+    ).resolves.toMatchObject({ success: false });
+    await notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "message",
+          id: "raw-status-1",
+          role: "assistant",
+          content: [{ type: "output_text", text: "I'm writing the report now." }],
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(request).not.toHaveBeenCalledWith("turn/interrupt", expect.anything());
+
+    await notify({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        turn: { id: "turn-1", status: "completed" },
+      },
+    });
+
+    await expect(run).resolves.toMatchObject({
+      aborted: false,
+      timedOut: false,
+      promptError: null,
+    });
+    expect(request).not.toHaveBeenCalledWith("turn/interrupt", expect.anything());
+  });
+
+  it("logs raw assistant item context when the terminal watchdog fires", async () => {
+    let notify: (notification: CodexServerNotification) => Promise<void> = async () => undefined;
+    let handleRequest:
+      | ((request: { id: string; method: string; params?: unknown }) => Promise<unknown>)
+      | undefined;
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/start") {
+        return threadStartResult("thread-1");
+      }
+      if (method === "turn/start") {
+        return turnStartResult("turn-1", "inProgress");
+      }
+      return {};
+    });
+    __testing.setCodexAppServerClientFactoryForTests(
+      async () =>
+        ({
+          request,
+          addNotificationHandler: (handler: typeof notify) => {
+            notify = handler;
+            return () => undefined;
+          },
+          addRequestHandler: (
+            handler: (request: {
+              id: string;
+              method: string;
+              params?: unknown;
+            }) => Promise<unknown>,
+          ) => {
+            handleRequest = handler;
+            return () => undefined;
+          },
+        }) as never,
+    );
+    const params = createParams(
+      path.join(tempDir, "session.jsonl"),
+      path.join(tempDir, "workspace"),
+    );
+    params.timeoutMs = 60_000;
+
+    const run = runCodexAppServerAttempt(params, {
+      turnCompletionIdleTimeoutMs: 5,
+      turnTerminalIdleTimeoutMs: 5,
+    });
+    await vi.waitFor(() => expect(handleRequest).toBeTypeOf("function"), { interval: 1 });
+
+    await expect(
+      handleRequest?.({
+        id: "request-tool-1",
+        method: "item/tool/call",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          callId: "call-1",
+          namespace: null,
+          tool: "message",
+          arguments: { action: "send", text: "already sent" },
+        },
+      }),
+    ).resolves.toMatchObject({ success: false });
+    await notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "message",
+          id: "raw-status-1",
+          role: "assistant",
+          content: [{ type: "output_text", text: "I'm writing the report now." }],
+        },
+      },
+    });
+
+    await expect(run).resolves.toMatchObject({
+      aborted: true,
+      timedOut: true,
+      promptError: "codex app-server turn idle timed out waiting for turn/completed",
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "codex app-server turn idle timed out waiting for terminal event",
+      expect.objectContaining({
+        threadId: "thread-1",
+        turnId: "turn-1",
+        timeoutMs: 5,
+        lastActivityReason: "notification:rawResponseItem/completed",
+        lastNotificationMethod: "rawResponseItem/completed",
+        lastNotificationItemId: "raw-status-1",
+        lastNotificationItemType: "message",
+        lastNotificationItemRole: "assistant",
+        lastAssistantTextPreview: "I'm writing the report now.",
+      }),
+    );
+    expect(warn).not.toHaveBeenCalledWith(
+      "codex app-server turn idle timed out waiting for completion",
+      expect.anything(),
+    );
   });
 
   it("releases the session when Codex accepts a turn but never sends progress", async () => {
@@ -2638,6 +2905,7 @@ describe("runCodexAppServerAttempt", () => {
         headers: {},
       },
       requestTimeoutMs: 60_000,
+      turnCompletionIdleTimeoutMs: 60_000,
       approvalPolicy: "on-request" as const,
       approvalsReviewer: "guardian_subagent" as const,
       sandbox: "danger-full-access" as const,
@@ -2694,6 +2962,9 @@ describe("runCodexAppServerAttempt", () => {
     expect(buildTurnCollaborationMode(params).settings.developer_instructions).toContain(
       "The purpose of heartbeats is to make you feel magical and proactive.",
     );
+    expect(buildTurnCollaborationMode(params).settings.developer_instructions).toContain(
+      "If `heartbeat_respond` is not already available and `tool_search` is available",
+    );
 
     params.trigger = "user";
     expect(buildTurnCollaborationMode(params).settings.developer_instructions).toBeNull();
@@ -2729,6 +3000,7 @@ describe("runCodexAppServerAttempt", () => {
           headers: {},
         },
         requestTimeoutMs: 60_000,
+        turnCompletionIdleTimeoutMs: 60_000,
         approvalPolicy: "never",
         approvalsReviewer: "user",
         sandbox: "workspace-write",
