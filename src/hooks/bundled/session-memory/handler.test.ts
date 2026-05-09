@@ -193,16 +193,6 @@ function expectMemoryConversation(params: {
   }
 }
 
-async function waitUntil(condition: () => boolean, timeoutMs = 500): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) {
-      throw new Error("condition was not met before timeout");
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 describe("session-memory hook", () => {
   it("skips non-command events", async () => {
     const tempDir = await createCaseWorkspace("workspace");
@@ -370,7 +360,7 @@ describe("session-memory hook", () => {
         await handler(event);
         expect(Date.now() - startedAt).toBeLessThan(100);
 
-        await waitUntil(() => generateSlug.mock.calls.length === 1);
+        await vi.waitFor(() => expect(generateSlug).toHaveBeenCalledTimes(1), { interval: 1 });
         resolveSlug?.("slow-reset");
         await flushSessionMemoryWritesForTest();
 
@@ -687,10 +677,12 @@ describe("session-memory hook", () => {
     });
 
     const memoryContent = await getRecentSessionContentWithResetFallback(activeSessionFile!);
-    expect(memoryContent).toBeTruthy();
+    if (!memoryContent) {
+      throw new Error("expected newest reset transcript content");
+    }
 
     expectMemoryConversation({
-      memoryContent: memoryContent!,
+      memoryContent,
       user: "Newest rotated transcript",
       assistant: "Newest summary",
       absent: "Older rotated transcript",
@@ -718,10 +710,12 @@ describe("session-memory hook", () => {
     });
 
     const memoryContent = await getRecentSessionContentWithResetFallback(activeSessionFile!);
-    expect(memoryContent).toBeTruthy();
+    if (!memoryContent) {
+      throw new Error("expected active transcript memory content");
+    }
 
     expectMemoryConversation({
-      memoryContent: memoryContent!,
+      memoryContent,
       user: "Active transcript message",
       assistant: "Active transcript summary",
       absent: "Reset fallback message",

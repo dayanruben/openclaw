@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { isRootHelpInvocation } from "./cli/argv.js";
+import { isRootHelpInvocation, isRootVersionInvocation } from "./cli/argv.js";
 import { parseCliContainerArgs, resolveCliContainerTarget } from "./cli/container-target.js";
+import { formatCliFailureLines } from "./cli/failure-output.js";
 import { applyCliProfileEnv, parseCliProfileArgs } from "./cli/profile.js";
+import { assertNotRoot } from "./cli/root-guard.js";
 import { normalizeWindowsArgv } from "./cli/windows-argv.js";
 import {
   enableOpenClawCompileCache,
@@ -91,6 +93,13 @@ if (
     ensureOpenClawExecMarkerOnProcess();
     installProcessWarningFilter();
     normalizeEnv();
+
+    // Block root execution early, before any state/config operations.
+    // Allow --help and --version so users can still discover the override env var.
+    if (!isRootHelpInvocation(process.argv) && !isRootVersionInvocation(process.argv)) {
+      assertNotRoot();
+    }
+
     enableOpenClawCompileCache({
       installRoot,
     });
@@ -206,10 +215,13 @@ async function runMainOrRootHelp(argv: string[]): Promise<void> {
     );
     await runCli(argv);
   } catch (error) {
-    console.error(
-      "[openclaw] Failed to start CLI:",
-      error instanceof Error ? (error.stack ?? error.message) : error,
-    );
+    for (const line of formatCliFailureLines({
+      title: "Could not start the CLI.",
+      error,
+      argv,
+    })) {
+      console.error(line);
+    }
     process.exit(1);
   }
 }
