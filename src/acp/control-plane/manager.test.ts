@@ -98,7 +98,9 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 function expectRecordFields(record: unknown, expected: Record<string, unknown>) {
-  expect(record).toBeDefined();
+  if (!record || typeof record !== "object") {
+    throw new Error("Expected record");
+  }
   const actual = record as Record<string, unknown>;
   for (const [key, value] of Object.entries(expected)) {
     expect(actual[key]).toEqual(value);
@@ -136,7 +138,9 @@ function findMockCallFields(mock: ReturnType<typeof vi.fn>, expected: Record<str
 }
 
 function expectMockCallFields(mock: ReturnType<typeof vi.fn>, expected: Record<string, unknown>) {
-  expect(findMockCallFields(mock, expected)).toBeDefined();
+  if (!findMockCallFields(mock, expected)) {
+    throw new Error(`Expected mock call ${JSON.stringify(expected)}`);
+  }
 }
 
 function expectNoMockCallFields(mock: ReturnType<typeof vi.fn>, expected: Record<string, unknown>) {
@@ -2172,9 +2176,9 @@ describe("AcpSessionManager", () => {
     });
 
     const internals = manager as unknown as {
-      actorTailBySession: Map<string, Promise<void>>;
+      actorQueue: { getTailMapForTesting(): Map<string, Promise<void>> };
     };
-    expect(internals.actorTailBySession.size).toBe(0);
+    expect(internals.actorQueue.getTailMapForTesting().size).toBe(0);
   });
 
   it("surfaces backend failures raised after a done event", async () => {
