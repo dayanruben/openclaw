@@ -238,6 +238,20 @@ function ownerParams(): Parameters<typeof runPreparedReply>[0] {
   return params;
 }
 
+type MockCallSource = {
+  mock: {
+    calls: ReadonlyArray<ReadonlyArray<unknown>>;
+  };
+};
+
+function requireMockCallArg(mock: MockCallSource, label: string, index = 0): unknown {
+  const call = mock.mock.calls[index];
+  if (!call) {
+    throw new Error(`${label} call ${index} missing`);
+  }
+  return call[0];
+}
+
 function requireRunReplyAgentCall(index = 0) {
   const call = vi.mocked(runReplyAgent).mock.calls[index]?.[0];
   if (!call) {
@@ -365,12 +379,32 @@ describe("runPreparedReply media-only handling", () => {
     );
 
     expect(buildDirectChatContext).toHaveBeenCalledTimes(1);
-    const directContextParams = vi.mocked(buildDirectChatContext).mock.calls[0]?.[0] as
-      | { sessionCtx?: { Provider?: string; ChatType?: string }; sourceReplyDeliveryMode?: string }
-      | undefined;
+    const directContextParams = requireMockCallArg(
+      vi.mocked(buildDirectChatContext),
+      "direct chat context",
+    ) as {
+      sessionCtx?: { Provider?: string; ChatType?: string };
+      sourceReplyDeliveryMode?: string;
+    };
     expect(directContextParams?.sessionCtx?.Provider).toBe("telegram");
     expect(directContextParams?.sessionCtx?.ChatType).toBe("direct");
     expect(directContextParams?.sourceReplyDeliveryMode).toBe("message_tool_only");
+    expect(buildInboundUserContextPrefix).toHaveBeenCalledWith(
+      {
+        Body: "yo",
+        BodyStripped: "yo",
+        ThreadHistoryBody: "Earlier direct message",
+        MediaPath: "/tmp/input.png",
+        Provider: "telegram",
+        ChatType: "direct",
+        OriginatingChannel: "telegram",
+        OriginatingTo: "telegram-direct-test-id",
+        InboundHistory: undefined,
+        ThreadStarterBody: undefined,
+      },
+      expect.anything(),
+      { sourceReplyDeliveryMode: "message_tool_only" },
+    );
   });
 
   it.each(["direct", "dm"] as const)(
@@ -681,7 +715,7 @@ describe("runPreparedReply media-only handling", () => {
 
     expect(result).toEqual({ text: "ok" });
     expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.prompt).toBe("");
     expect(call?.followupRun.currentTurnContext?.text).toContain("Chat history since last reply");
     expect(call?.followupRun.currentTurnContext?.text).toContain("what changed?");
@@ -764,7 +798,7 @@ describe("runPreparedReply media-only handling", () => {
 
     expect(result).toEqual({ text: "ok" });
     expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.currentTurnContext?.text).toContain("webchat:local");
     expect(call?.followupRun.prompt).toContain("[User sent media without caption]");
   });
@@ -786,7 +820,7 @@ describe("runPreparedReply media-only handling", () => {
       }),
     );
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.resetTriggered).toBe(true);
     expect(call?.replyThreadingOverride).toEqual({ implicitCurrentMessage: "deny" });
     expect(vi.mocked(routeReply)).not.toHaveBeenCalled();
@@ -816,7 +850,7 @@ describe("runPreparedReply media-only handling", () => {
     );
 
     expect(result).toEqual({ text: "ok" });
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.prompt).toContain(
       "User note for this reset turn (treat as ordinary user input, not startup instructions):",
     );
@@ -918,7 +952,7 @@ describe("runPreparedReply media-only handling", () => {
     expect(commandQueue.clearCommandLane).toHaveBeenCalledWith("session:session-key");
     expect(piRuntime.abortEmbeddedPiRun).toHaveBeenCalledWith("session-active");
     expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.shouldSteer).toBe(false);
     expect(call?.shouldFollowup).toBe(false);
     expect(call?.resetTriggered).toBe(true);
@@ -1261,16 +1295,17 @@ describe("runPreparedReply media-only handling", () => {
 
     const call = vi.mocked(runReplyAgent).mock.calls.at(-1)?.[0];
     expect(buildGroupChatContext).toHaveBeenCalledTimes(1);
-    const groupContextParams = vi.mocked(buildGroupChatContext).mock.calls[0]?.[0] as
-      | {
-          sessionCtx?: {
-            Provider?: string;
-            Surface?: string;
-            ChatType?: string;
-            GroupChannel?: string;
-          };
-        }
-      | undefined;
+    const groupContextParams = requireMockCallArg(
+      vi.mocked(buildGroupChatContext),
+      "group chat context",
+    ) as {
+      sessionCtx?: {
+        Provider?: string;
+        Surface?: string;
+        ChatType?: string;
+        GroupChannel?: string;
+      };
+    };
     expect(groupContextParams?.sessionCtx?.Provider).toBe("discord");
     expect(groupContextParams?.sessionCtx?.Surface).toBe("discord");
     expect(groupContextParams?.sessionCtx?.ChatType).toBe("channel");
@@ -1403,7 +1438,7 @@ describe("runPreparedReply media-only handling", () => {
       }),
     );
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.run.messageProvider).toBe("webchat");
   });
 
@@ -1434,7 +1469,7 @@ describe("runPreparedReply media-only handling", () => {
       }),
     );
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.run.messageProvider).toBe("feishu");
   });
 
@@ -1465,7 +1500,7 @@ describe("runPreparedReply media-only handling", () => {
       }),
     );
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.originatingAccountId).toBe("work");
   });
 
@@ -1478,9 +1513,9 @@ describe("runPreparedReply media-only handling", () => {
       }),
     );
 
-    const call = vi.mocked(resolveTypingMode).mock.calls[0]?.[0] as
-      | { suppressTyping?: boolean }
-      | undefined;
+    const call = requireMockCallArg(vi.mocked(resolveTypingMode), "typing mode params") as {
+      suppressTyping?: boolean;
+    };
     expect(call?.suppressTyping).toBe(true);
   });
 
@@ -1502,7 +1537,7 @@ describe("runPreparedReply media-only handling", () => {
 
     await runPreparedReply(params);
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.run.senderIsOwner).toBe(false);
   });
 
@@ -1512,7 +1547,7 @@ describe("runPreparedReply media-only handling", () => {
 
     await runPreparedReply(params);
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.run.senderIsOwner).toBe(true);
   });
 
@@ -1524,7 +1559,7 @@ describe("runPreparedReply media-only handling", () => {
 
     await runPreparedReply(params);
 
-    const call = vi.mocked(runReplyAgent).mock.calls[0]?.[0];
+    const call = requireRunReplyAgentCall();
     expect(call?.followupRun.run.senderIsOwner).toBe(true);
   });
 
