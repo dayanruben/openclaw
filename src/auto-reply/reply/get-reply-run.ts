@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { hasSessionAutoModelFallbackProvenance } from "../../agents/agent-scope.js";
 import { resolveSessionAuthProfileOverride } from "../../agents/auth-profiles/session-override.js";
 import type { ExecToolDefaults } from "../../agents/bash-tools.js";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
@@ -421,6 +422,7 @@ export async function runPreparedReply(
     ctx,
     isHeartbeat,
   });
+  const inboundTurnKind = promptSessionCtx.InboundTurnKind;
   const silentReplyConversationType = resolvePromptSilentReplyConversationType({
     ctx: promptSessionCtx,
     inboundSessionKey: ctx.SessionKey,
@@ -471,9 +473,6 @@ export async function runPreparedReply(
     ? buildDirectChatContext({
         sessionCtx: promptSessionCtx,
         sourceReplyDeliveryMode: opts?.sourceReplyDeliveryMode,
-        silentReplyPolicy: silentReplySettings.policy,
-        silentReplyRewrite: silentReplySettings.rewrite,
-        silentToken: SILENT_REPLY_TOKEN,
       })
     : "";
   // Always include persistent group chat context (provider + reply guidance).
@@ -482,7 +481,6 @@ export async function runPreparedReply(
         sessionCtx: promptSessionCtx,
         sourceReplyDeliveryMode: opts?.sourceReplyDeliveryMode,
         silentReplyPolicy: silentReplySettings.policy,
-        silentReplyRewrite: silentReplySettings.rewrite,
         silentToken: SILENT_REPLY_TOKEN,
       })
     : "";
@@ -495,7 +493,6 @@ export async function runPreparedReply(
         defaultActivation,
         silentToken: SILENT_REPLY_TOKEN,
         silentReplyPolicy: silentReplySettings.policy,
-        silentReplyRewrite: silentReplySettings.rewrite,
       })
     : "";
   const allowEmptyAssistantReplyAsSilent =
@@ -507,7 +504,6 @@ export async function runPreparedReply(
         sessionEntry,
         defaultActivation,
         silentReplyPolicy: silentReplySettings.policy,
-        silentReplyRewrite: silentReplySettings.rewrite,
       }).allowEmptyAssistantReplyAsSilent);
   const groupSystemPrompt = normalizeOptionalString(promptSessionCtx.GroupSystemPrompt) ?? "";
   const inboundMetaPrompt = buildInboundMetaSystemPrompt(
@@ -650,6 +646,7 @@ export async function runPreparedReply(
     startupContextPrelude,
     softResetTail,
     isHeartbeat,
+    turnKind: inboundTurnKind,
   });
   const effectiveBaseBody = promptEnvelopeBase.effectiveBaseBody;
   let prefixedBodyBase = await applySessionHints({
@@ -721,6 +718,7 @@ export async function runPreparedReply(
       startupContextPrelude,
       softResetTail,
       isHeartbeat,
+      turnKind: inboundTurnKind,
       threadContextNote,
       systemEventBlocks: drainedSystemEventBlocks,
     });
@@ -751,6 +749,7 @@ export async function runPreparedReply(
   const skillsSnapshot = skillResult.skillsSnapshot;
   let { prefixedCommandBody, queuedBody, transcriptCommandBody, currentTurnContext } =
     await traceRunPhase("reply.build_prompt_bodies", () => rebuildPromptBodies());
+  const isRoomEvent = inboundTurnKind === "room_event";
   if (!resolvedThinkLevel) {
     resolvedThinkLevel = await modelState.resolveDefaultThinkingLevel();
   }
@@ -848,6 +847,7 @@ export async function runPreparedReply(
   const activeSessionIdForInterrupt = piRuntime?.resolveActiveEmbeddedRunSessionId(sessionKey);
   if (
     activeRunQueueMode === "interrupt" &&
+    !isRoomEvent &&
     sessionLaneKey &&
     (laneSize > 0 || activeSessionIdForInterrupt)
   ) {
@@ -908,10 +908,12 @@ export async function runPreparedReply(
   };
   let { activeSessionId, isActive, isStreaming } = resolveQueueBusyState();
   const isHeartbeatRun = opts?.isHeartbeat === true;
-  const shouldSteer = !isHeartbeatRun && !effectiveResetTriggered && resolvedQueue.mode === "steer";
+  const shouldSteer =
+    !isRoomEvent && !isHeartbeatRun && !effectiveResetTriggered && resolvedQueue.mode === "steer";
   const shouldFollowup =
     !effectiveResetTriggered &&
-    (resolvedQueue.mode === "steer" ||
+    ((isRoomEvent && isActive) ||
+      resolvedQueue.mode === "steer" ||
       resolvedQueue.mode === "followup" ||
       resolvedQueue.mode === "collect");
   const activeRunQueueAction = resolveActiveRunQueueAction({
@@ -964,10 +966,20 @@ export async function runPreparedReply(
     normalizeOptionalString(preparedSessionState.sessionEntry?.modelOverride) ||
     normalizeOptionalString(preparedSessionState.sessionEntry?.providerOverride),
   );
+  const runModelOverrideSource = runHasSessionModelOverride
+    ? preparedSessionState.sessionEntry?.modelOverrideSource
+    : undefined;
+  const runHasAutoFallbackProvenance =
+    runHasSessionModelOverride &&
+    hasSessionAutoModelFallbackProvenance(preparedSessionState.sessionEntry);
   const followupRun = {
     prompt: queuedBody,
     transcriptPrompt: transcriptCommandBody,
+    currentTurnKind: inboundTurnKind,
     currentTurnContext,
+    abortSignal: opts?.abortSignal,
+    deliveryCorrelations: opts?.queuedDeliveryCorrelations,
+    queuedLifecycle: opts?.queuedFollowupLifecycle,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
@@ -1013,9 +1025,8 @@ export async function runPreparedReply(
       provider,
       model,
       hasSessionModelOverride: runHasSessionModelOverride,
-      modelOverrideSource: runHasSessionModelOverride
-        ? preparedSessionState.sessionEntry?.modelOverrideSource
-        : undefined,
+      modelOverrideSource: runModelOverrideSource,
+      hasAutoFallbackProvenance: runHasAutoFallbackProvenance || undefined,
       authProfileId,
       authProfileIdSource,
       thinkLevel: resolvedThinkLevel,
@@ -1046,11 +1057,13 @@ export async function runPreparedReply(
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       inputProvenance: ctx.InputProvenance ?? sessionCtx.InputProvenance,
       extraSystemPrompt: extraSystemPromptParts.join("\n\n") || undefined,
-      sourceReplyDeliveryMode: opts?.sourceReplyDeliveryMode,
+      sourceReplyDeliveryMode: isRoomEvent ? "message_tool_only" : opts?.sourceReplyDeliveryMode,
       silentReplyPromptMode,
       extraSystemPromptStatic: extraSystemPromptStaticParts.join("\n\n"),
       skipProviderRuntimeHints: useFastReplyRuntime,
       allowEmptyAssistantReplyAsSilent,
+      suppressNextUserMessagePersistence: isRoomEvent,
+      suppressTranscriptOnlyAssistantPersistence: isRoomEvent,
       ...(!useFastReplyRuntime &&
       isReasoningTagProvider(provider, {
         config: cfg,
