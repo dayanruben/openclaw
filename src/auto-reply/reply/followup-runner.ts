@@ -25,6 +25,7 @@ import { logVerbose } from "../../globals.js";
 import { emitAgentEvent, registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { defaultRuntime } from "../../runtime.js";
+import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../sessions/input-provenance.js";
 import { readStringValue } from "../../shared/string-coerce.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
@@ -44,11 +45,13 @@ import { resolveFollowupDeliveryPayloads } from "./followup-delivery.js";
 import { resolveOriginMessageProvider } from "./origin-routing.js";
 import {
   completeFollowupRunLifecycle,
+  FollowupRunDeferredError,
   isFollowupRunAborted,
   refreshQueuedFollowupSession,
   type FollowupRun,
 } from "./queue.js";
-import { createReplyOperation } from "./reply-run-registry.js";
+import type { ReplyOperation } from "./reply-run-registry.js";
+import { admitReplyTurn } from "./reply-turn-admission.js";
 import { isRoutableChannel, routeReply } from "./route-reply.js";
 import { incrementRunCompactionCount, persistRunSessionUsage } from "./session-run-accounting.js";
 import { createTypingSignaler } from "./typing-mode.js";
@@ -397,7 +400,8 @@ export function createFollowupRunner(params: {
       .filter((end): end is () => void => typeof end === "function");
     const queuedImages = queued.images ?? opts?.images;
     const queuedImageOrder = queued.imageOrder ?? opts?.imageOrder;
-    let replyOperation: ReturnType<typeof createReplyOperation> | undefined;
+    let replyOperation: ReplyOperation | undefined;
+    let deferred = false;
 
     try {
       queued.run.config = await resolveQueuedReplyExecutionConfig(queued.run.config, {
@@ -481,12 +485,38 @@ export function createFollowupRunner(params: {
           await Promise.all(pendingProgressDeliveries);
         }
       };
-      replyOperation = createReplyOperation({
+      const admission = await admitReplyTurn({
         sessionId: run.sessionId,
         sessionKey: replySessionKey ?? "",
+        kind: "queued_followup",
         resetTriggered: false,
         upstreamAbortSignal: queued.abortSignal,
       });
+      if (admission.status === "skipped") {
+        if (admission.reason === "active-run") {
+          deferred = true;
+          throw new FollowupRunDeferredError("Follow-up reply lane is still active");
+        }
+        return;
+      }
+      replyOperation = admission.operation;
+      if (replyOperation.sessionId !== run.sessionId) {
+        run = { ...run, sessionId: replyOperation.sessionId };
+        effectiveQueued = { ...effectiveQueued, run };
+        const admittedSessionEntry = replySessionKey
+          ? (sessionStore?.[replySessionKey] ??
+            (storePath
+              ? (readSessionEntry(storePath, replySessionKey) as SessionEntry | undefined)
+              : undefined))
+          : undefined;
+        if (admittedSessionEntry?.sessionId === replyOperation.sessionId) {
+          activeSessionEntry = admittedSessionEntry;
+          if (admittedSessionEntry.sessionFile) {
+            run = { ...run, sessionFile: admittedSessionEntry.sessionFile };
+            effectiveQueued = { ...effectiveQueued, run };
+          }
+        }
+      }
       const runId = crypto.randomUUID();
       const shouldSurfaceToControlUi = isInternalMessageChannel(
         resolveOriginMessageProvider({
@@ -521,6 +551,9 @@ export function createFollowupRunner(params: {
       let bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
         activeSessionEntry?.systemPromptReport,
       );
+      const preserveUserFacingSessionState = shouldPreserveUserFacingSessionStateForInputProvenance(
+        queued.run.inputProvenance,
+      );
       const resolveRunForFallbackCandidate = (
         provider: string,
         model: string,
@@ -553,6 +586,9 @@ export function createFollowupRunner(params: {
         provider: string;
         model: string;
       }): Promise<void> => {
+        if (preserveUserFacingSessionState) {
+          return;
+        }
         const probe = run.autoFallbackPrimaryProbe;
         if (!probe) {
           return;
@@ -944,6 +980,7 @@ export function createFollowupRunner(params: {
           lastCallUsage: runResult.meta?.agentMeta?.lastCallUsage,
           promptTokens,
           isHeartbeat: opts?.isHeartbeat === true,
+          preserveUserFacingSessionModelState: preserveUserFacingSessionState,
           modelUsed,
           providerUsed,
           contextTokensUsed,
@@ -1035,7 +1072,9 @@ export function createFollowupRunner(params: {
           );
         }
       }
-      completeFollowupRunLifecycle(queued);
+      if (!deferred) {
+        completeFollowupRunLifecycle(queued);
+      }
       replyOperation?.complete();
       // Both signals are required for the typing controller to clean up.
       // The main inbound dispatch path calls markDispatchIdle() from the
