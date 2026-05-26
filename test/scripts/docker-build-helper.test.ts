@@ -22,6 +22,7 @@ const PLUGIN_BINDING_COMMAND_ESCAPE_DOCKER_E2E_PATH =
   "scripts/e2e/plugin-binding-command-escape-docker.sh";
 const PLUGIN_BINDING_COMMAND_ESCAPE_DOCKERFILE_PATH =
   "scripts/e2e/plugin-binding-command-escape.Dockerfile";
+const MULTI_NODE_UPDATE_DOCKER_E2E_PATH = "scripts/e2e/multi-node-update-docker.sh";
 const BUNDLED_PLUGIN_INSTALL_UNINSTALL_E2E_PATH =
   "scripts/e2e/bundled-plugin-install-uninstall-docker.sh";
 const BUNDLED_PLUGIN_INSTALL_UNINSTALL_SWEEP_PATH =
@@ -216,6 +217,24 @@ describe("docker build helper", () => {
     expect(scenario).not.toContain("before_hash");
   });
 
+  it("fails the multi-node update probe on update or restart regressions", () => {
+    const runner = readFileSync(MULTI_NODE_UPDATE_DOCKER_E2E_PATH, "utf8");
+
+    expect(runner).toContain("UPDATE_FAILED=0");
+    expect(runner).toContain("GATEWAY_START_FAILED=0");
+    expect(runner).toContain("GATEWAY_HEALTH_FAILED=0");
+    expect(runner).toContain('if [ "$UPDATE_FAILED" -ne 0 ]; then');
+    expect(runner).toContain('if [ "$GATEWAY_START_FAILED" -ne 0 ]; then');
+    expect(runner).toContain('if [ "$GATEWAY_HEALTH_FAILED" -ne 0 ]; then');
+    expect(runner).toContain("ActiveState=active");
+    expect(runner).toContain("OPENCLAW_NO_RESPAWN=1");
+    expect(runner).toContain("is-enabled)");
+    expect(runner).toContain("/healthz");
+    expect(runner).toContain("FAIL: gateway install failed before update");
+    expect(runner).not.toContain('gateway-install.err" || true');
+    expect(runner).not.toContain("WARNING: Gateway status probe failed");
+  });
+
   it("caps package acceptance legacy compatibility at 2026.4.25", () => {
     const doctorScenario = readFileSync(DOCTOR_SWITCH_SCENARIO_PATH, "utf8");
     const updateChannel = readFileSync(UPDATE_CHANNEL_SWITCH_DOCKER_E2E_PATH, "utf8");
@@ -316,6 +335,8 @@ describe("docker build helper", () => {
     expect(runner).toContain("OPENCLAW_BUNDLED_PLUGIN_SWEEP_INDEX");
     expect(runner).toContain("OPENCLAW_BUNDLED_PLUGIN_RUNTIME_READY_MS");
     expect(runner).toContain("scripts/e2e/lib/bundled-plugin-install-uninstall/sweep.sh");
+    expect(runner).toContain('tee "$RUN_LOG"');
+    expect(runner).not.toContain('cat "$RUN_LOG"');
     expect(probe).toContain('"openclaw.plugin.json"');
     expect(runtimeSmoke).toContain("process.env.OPENCLAW_BUNDLED_PLUGIN_RUNTIME_READY_MS");
     expect(runtimeSmoke).toContain("900000");
