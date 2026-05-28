@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
+import { CURRENT_SESSION_VERSION } from "openclaw/plugin-sdk/agent-sessions";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { registerLegacyContextEngine } from "../../context-engine/legacy.registration.js";
@@ -82,6 +82,10 @@ const mockBuildActiveMusicGenerationTaskPromptContextForSession = vi.mocked(
   buildActiveMusicGenerationTaskPromptContextForSession,
 );
 
+function wrappedPluginSystemContext(text: string): string {
+  return `---\n\nOpenClaw plugin-injected system context. This block is not workspace file content.\n\n${text}\n\n---`;
+}
+
 function createTestMcpLoopbackServerConfig(port: number) {
   return {
     mcpServers: {
@@ -95,6 +99,7 @@ function createTestMcpLoopbackServerConfig(port: number) {
           "x-openclaw-account-id": "${OPENCLAW_MCP_ACCOUNT_ID}",
           "x-openclaw-message-channel": "${OPENCLAW_MCP_MESSAGE_CHANNEL}",
           "x-openclaw-inbound-event-kind": "${OPENCLAW_MCP_INBOUND_EVENT_KIND}",
+          "x-openclaw-source-reply-delivery-mode": "${OPENCLAW_MCP_SOURCE_REPLY_DELIVERY_MODE}",
         },
       },
     },
@@ -204,6 +209,10 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       ),
       resolveMcpLoopbackScopedTools: vi.fn(() => ({ agentId: "main", tools: [] })),
       resolveOpenClawReferencePaths: vi.fn(async () => ({ docsPath: null, sourcePath: null })),
+      prepareClaudeCliSkillsPlugin: vi.fn(async () => ({
+        args: [],
+        cleanup: vi.fn(async () => undefined),
+      })),
     });
     mockGetGlobalHookRunner.mockReturnValue(null);
     getRuntimeConfigMock.mockReturnValue({});
@@ -321,7 +330,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       expect(context.params.prompt).toBe("history:2\n\nlatest ask");
       expect(context.contextEngineTurnPrompt).toBe("latest ask");
       expect(context.systemPrompt).toBe(
-        "prepend system\n\nhook system\n\nappend system\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.",
+        `${wrappedPluginSystemContext("prepend system")}\n\nhook system\n\n${wrappedPluginSystemContext("append system")}\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.`,
       );
       expect(hookRunner.runBeforePromptBuild).toHaveBeenCalledTimes(1);
       const beforePromptBuildCalls = hookRunner.runBeforePromptBuild.mock.calls as unknown as Array<
@@ -556,7 +565,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
 
       expect(context.params.prompt).toBe("prompt prepend\n\nlegacy prepend\n\nlatest ask");
       expect(context.systemPrompt).toBe(
-        "prompt prepend system\n\nlegacy prepend system\n\nprompt system\n\nprompt append system\n\nlegacy append system\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.",
+        `${wrappedPluginSystemContext("prompt prepend system")}\n\n${wrappedPluginSystemContext("legacy prepend system")}\n\nprompt system\n\n${wrappedPluginSystemContext("prompt append system")}\n\n${wrappedPluginSystemContext("legacy append system")}\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.`,
       );
       expect(hookRunner.runBeforePromptBuild).toHaveBeenCalledOnce();
       expect(hookRunner.runBeforeAgentStart).toHaveBeenCalledOnce();
@@ -712,7 +721,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
           hostRequirements: {
             "agent-run": {
               requiredCapabilities: ["assemble-before-prompt"],
-              unsupportedMessage: "Use the native Codex or Pi embedded runtime.",
+              unsupportedMessage: "Use the native Codex or OpenClaw embedded runtime.",
             },
           },
         },
@@ -829,6 +838,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         extraSystemPromptStatic: "",
         cliSessionBinding: {
           sessionId: "cli-session",
+          cwdHash: hashCliSessionText(dir),
         },
         config: createCliBackendConfig({ systemPromptOverride: null }),
       });
@@ -837,6 +847,32 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       expect(context.extraSystemPromptHash).toBeUndefined();
       expect(context.reusableCliSession).toEqual({ sessionId: "cli-session" });
     } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses cwd for CLI system prompt workspace guidance", async () => {
+    const { dir, sessionFile } = createSessionFile();
+    const taskDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-cli-task-"));
+    try {
+      const context = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionFile,
+        workspaceDir: dir,
+        cwd: taskDir,
+        prompt: "latest ask",
+        provider: "test-cli",
+        model: "test-model",
+        timeoutMs: 1_000,
+        runId: "run-test-cwd-prompt",
+        config: createCliBackendConfig({ systemPromptOverride: null }),
+      });
+
+      expect(context.cwd).toBe(taskDir);
+      expect(context.systemPrompt).toContain(`Your working directory is: ${taskDir}`);
+      expect(context.systemPrompt).not.toContain(`Your working directory is: ${dir}`);
+    } finally {
+      fs.rmSync(taskDir, { recursive: true, force: true });
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -859,6 +895,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         cliSessionBinding: {
           sessionId: "cli-session",
           extraSystemPromptHash: hashCliSessionText(staticPrompt),
+          cwdHash: hashCliSessionText(dir),
         },
         config: createCliBackendConfig(),
       });
@@ -938,6 +975,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         runId: "run-test-session-expired-reseed-opt-in",
         cliSessionBinding: {
           sessionId: "cli-session",
+          cwdHash: hashCliSessionText(dir),
         },
         config: createCliBackendConfig({
           systemPromptOverride: null,
@@ -987,7 +1025,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
       });
 
       expect(context.systemPrompt).toBe(
-        "active image task\n\nactive video task\n\nhook prepend system\n\nhook system\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.",
+        `active image task\n\nactive video task\n\n${wrappedPluginSystemContext("hook prepend system")}\n\nhook system\n\nCurrent model identity: test-cli/test-model. If asked what model you are, answer with this value for the current run.`,
       );
       expect(mockBuildActiveImageGenerationTaskPromptContextForSession).toHaveBeenCalledWith(
         "agent:main:test",
@@ -1093,7 +1131,6 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
           },
         ],
       });
-
       const context = await prepareCliRunContext({
         sessionId: "session-test",
         sessionKey: "agent:main:test",
@@ -1117,6 +1154,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         messageProvider: undefined,
         accountId: undefined,
         inboundEventKind: undefined,
+        sourceReplyDeliveryMode: undefined,
       });
       expect(context.systemPrompt).toContain("## Memory Recall");
       expect(context.systemPrompt).toContain("tools=memory_search");
@@ -1183,7 +1221,6 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
           },
         ],
       });
-
       const context = await prepareCliRunContext({
         sessionId: "session-test",
         sessionKey: "agent:main:test",
@@ -1244,7 +1281,6 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
           },
         ],
       });
-
       const context = await prepareCliRunContext({
         sessionId: "session-test",
         sessionKey: "agent:main:telegram:group:chat123",
@@ -1258,11 +1294,13 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         config: createCliBackendConfig(),
         currentInboundEventKind: "room_event",
         messageChannel: "telegram",
+        sourceReplyDeliveryMode: "message_tool_only",
       });
 
       expect(context.preparedBackend.env).toMatchObject({
         OPENCLAW_MCP_MESSAGE_CHANNEL: "telegram",
         OPENCLAW_MCP_INBOUND_EVENT_KIND: "room_event",
+        OPENCLAW_MCP_SOURCE_REPLY_DELIVERY_MODE: "message_tool_only",
       });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -1443,13 +1481,277 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         model: "opus",
         timeoutMs: 1_000,
         runId: "run-77011-present",
-        cliSessionBinding: { sessionId: "live-claude-sid" },
+        cliSessionBinding: { sessionId: "live-claude-sid", cwdHash: hashCliSessionText(dir) },
         cliSessionId: "live-claude-sid",
         config: createCliBackendConfig({ systemPromptOverride: null }),
       });
 
       expect(transcriptCheck).toHaveBeenCalledWith({ sessionId: "live-claude-sid" });
       expect(context.reusableCliSession).toEqual({ sessionId: "live-claude-sid" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits Claude CLI prompt skills when the native skills plugin can carry them", async () => {
+    const { dir, sessionFile } = createSessionFile();
+    const skillDir = path.join(dir, "skills", "weather");
+    fs.mkdirSync(skillDir, { recursive: true });
+    const skillFilePath = path.join(skillDir, "SKILL.md");
+    fs.writeFileSync(
+      skillFilePath,
+      [
+        "---",
+        "name: weather",
+        "description: Use weather tools for forecasts.",
+        "---",
+        "",
+        "Read forecast data before replying.",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    try {
+      cliBackendsTesting.setDepsForTest({
+        resolvePluginSetupCliBackend: () => undefined,
+        resolveRuntimeCliBackends: () => [
+          {
+            id: "claude-cli",
+            pluginId: "anthropic",
+            bundleMcp: false,
+            config: {
+              command: "claude",
+              args: ["--print"],
+              output: "jsonl",
+              input: "stdin",
+              sessionMode: "existing",
+            },
+          },
+        ],
+      });
+      setCliRunnerPrepareTestDeps({
+        prepareClaudeCliSkillsPlugin: vi.fn(async () => ({
+          args: ["--plugin-dir", path.join(dir, "openclaw-skills")],
+          cleanup: vi.fn(async () => undefined),
+          pluginDir: path.join(dir, "openclaw-skills"),
+        })),
+      });
+
+      const context = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "latest ask",
+        provider: "claude-cli",
+        model: "opus",
+        timeoutMs: 1_000,
+        runId: "run-claude-plugin-skills-prompt",
+        config: createCliBackendConfig({ systemPromptOverride: null }),
+        skillsSnapshot: {
+          prompt: [
+            "<available_skills>",
+            "  <skill>",
+            "    <name>weather</name>",
+            "    <description>Use weather tools for forecasts.</description>",
+            `    <location>${skillFilePath}</location>`,
+            "  </skill>",
+            "</available_skills>",
+          ].join("\n"),
+          skills: [{ name: "weather" }],
+          resolvedSkills: [
+            {
+              name: "weather",
+              description: "Use weather tools for forecasts.",
+              filePath: skillFilePath,
+              baseDir: skillDir,
+              source: "test",
+              sourceInfo: {
+                path: skillDir,
+                source: "test",
+                scope: "project",
+                origin: "top-level",
+                baseDir: skillDir,
+              },
+              disableModelInvocation: false,
+            },
+          ],
+        },
+      });
+
+      expect(context.systemPrompt).not.toContain("<available_skills>");
+      expect(context.systemPrompt).not.toContain("<name>weather</name>");
+      expect(context.systemPromptReport.skills.promptChars).toBe(0);
+      expect(context.claudeSkillsPluginArgs).toEqual([
+        "--plugin-dir",
+        path.join(dir, "openclaw-skills"),
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Claude CLI prompt skills when the snapshot has no materialized plugin skills", async () => {
+    const { dir, sessionFile } = createSessionFile();
+    const missingSkillDir = path.join(dir, "skills", "missing");
+    const missingSkillFilePath = path.join(missingSkillDir, "SKILL.md");
+
+    try {
+      cliBackendsTesting.setDepsForTest({
+        resolvePluginSetupCliBackend: () => undefined,
+        resolveRuntimeCliBackends: () => [
+          {
+            id: "claude-cli",
+            pluginId: "anthropic",
+            bundleMcp: false,
+            config: {
+              command: "claude",
+              args: ["--print"],
+              output: "jsonl",
+              input: "stdin",
+              sessionMode: "existing",
+            },
+          },
+        ],
+      });
+
+      const context = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "latest ask",
+        provider: "claude-cli",
+        model: "opus",
+        timeoutMs: 1_000,
+        runId: "run-claude-plugin-skills-prompt-fallback",
+        config: createCliBackendConfig({ systemPromptOverride: null }),
+        skillsSnapshot: {
+          prompt: [
+            "<available_skills>",
+            "  <skill>",
+            "    <name>weather</name>",
+            "    <description>Use weather tools for forecasts.</description>",
+            `    <location>${missingSkillFilePath}</location>`,
+            "  </skill>",
+            "</available_skills>",
+          ].join("\n"),
+          skills: [{ name: "weather" }],
+          resolvedSkills: [
+            {
+              name: "weather",
+              description: "Use weather tools for forecasts.",
+              filePath: missingSkillFilePath,
+              baseDir: missingSkillDir,
+              source: "test",
+              sourceInfo: {
+                path: missingSkillDir,
+                source: "test",
+                scope: "project",
+                origin: "top-level",
+                baseDir: missingSkillDir,
+              },
+              disableModelInvocation: false,
+            },
+          ],
+        },
+      });
+
+      expect(context.systemPrompt).toContain("<available_skills>");
+      expect(context.systemPrompt).toContain("<name>weather</name>");
+      expect(context.systemPromptReport.skills.promptChars).toBeGreaterThan(0);
+      expect(context.claudeSkillsPluginArgs).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps Claude CLI prompt skills when plugin materialization produces no args", async () => {
+    const { dir, sessionFile } = createSessionFile();
+    const skillDir = path.join(dir, "skills", "weather");
+    fs.mkdirSync(skillDir, { recursive: true });
+    const skillFilePath = path.join(skillDir, "SKILL.md");
+    fs.writeFileSync(
+      skillFilePath,
+      [
+        "---",
+        "name: weather",
+        "description: Use weather tools for forecasts.",
+        "---",
+        "",
+        "Read forecast data before replying.",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    try {
+      cliBackendsTesting.setDepsForTest({
+        resolvePluginSetupCliBackend: () => undefined,
+        resolveRuntimeCliBackends: () => [
+          {
+            id: "claude-cli",
+            pluginId: "anthropic",
+            bundleMcp: false,
+            config: {
+              command: "claude",
+              args: ["--print"],
+              output: "jsonl",
+              input: "stdin",
+              sessionMode: "existing",
+            },
+          },
+        ],
+      });
+      setCliRunnerPrepareTestDeps({
+        prepareClaudeCliSkillsPlugin: vi.fn(async () => ({
+          args: [],
+          cleanup: vi.fn(async () => undefined),
+        })),
+      });
+
+      const context = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "latest ask",
+        provider: "claude-cli",
+        model: "opus",
+        timeoutMs: 1_000,
+        runId: "run-claude-plugin-skills-prompt-materialization-fallback",
+        config: createCliBackendConfig({ systemPromptOverride: null }),
+        skillsSnapshot: {
+          prompt: [
+            "<available_skills>",
+            "  <skill>",
+            "    <name>weather</name>",
+            "    <description>Use weather tools for forecasts.</description>",
+            `    <location>${skillFilePath}</location>`,
+            "  </skill>",
+            "</available_skills>",
+          ].join("\n"),
+          skills: [{ name: "weather" }],
+          resolvedSkills: [
+            {
+              name: "weather",
+              description: "Use weather tools for forecasts.",
+              filePath: skillFilePath,
+              baseDir: skillDir,
+              source: "test",
+              sourceInfo: {
+                path: skillDir,
+                source: "test",
+                scope: "project",
+                origin: "top-level",
+                baseDir: skillDir,
+              },
+              disableModelInvocation: false,
+            },
+          ],
+        },
+      });
+
+      expect(context.systemPrompt).toContain("<available_skills>");
+      expect(context.systemPrompt).toContain("<name>weather</name>");
+      expect(context.systemPromptReport.skills.promptChars).toBeGreaterThan(0);
+      expect(context.claudeSkillsPluginArgs).toEqual([]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -1472,7 +1774,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         model: "test-model",
         timeoutMs: 1_000,
         runId: "run-77011-other-provider",
-        cliSessionBinding: { sessionId: "test-cli-sid" },
+        cliSessionBinding: { sessionId: "test-cli-sid", cwdHash: hashCliSessionText(dir) },
         config: createCliBackendConfig({ systemPromptOverride: null }),
       });
 
@@ -1687,7 +1989,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         model: "claude-haiku-3-5",
         timeoutMs: 1_000,
         runId: "run-raw-reseed-cap-override",
-        cliSessionBinding: { sessionId: "cli-session" },
+        cliSessionBinding: { sessionId: "cli-session", cwdHash: hashCliSessionText(dir) },
         config: createCliBackendConfig({ systemPromptOverride: null }),
       });
 
