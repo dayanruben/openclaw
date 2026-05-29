@@ -1,6 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { renderQaMarkdownReport } from "openclaw/plugin-sdk/qa-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderQaMarkdownReport } from "../../report.js";
 import { testing as liveTesting } from "./runtime.js";
 
 afterEach(() => {
@@ -98,6 +98,10 @@ describe("matrix live qa runtime", () => {
       expect(liveTesting.createMatrixQaRunDeadline().timeoutMs).toBe(12345);
       process.env.OPENCLAW_QA_MATRIX_TIMEOUT_MS = "nope";
       expect(liveTesting.createMatrixQaRunDeadline().timeoutMs).toBe(30 * 60_000);
+      process.env.OPENCLAW_QA_MATRIX_TIMEOUT_MS = "1e3";
+      expect(liveTesting.createMatrixQaRunDeadline().timeoutMs).toBe(30 * 60_000);
+      process.env.OPENCLAW_QA_MATRIX_TIMEOUT_MS = "1.5";
+      expect(liveTesting.createMatrixQaRunDeadline().timeoutMs).toBe(30 * 60_000);
     } finally {
       if (previous === undefined) {
         delete process.env.OPENCLAW_QA_MATRIX_TIMEOUT_MS;
@@ -146,6 +150,8 @@ describe("matrix live qa runtime", () => {
       process.env.OPENCLAW_QA_MATRIX_CANARY_TIMEOUT_MS = "90000";
       expect(liveTesting.resolveMatrixQaCanaryTimeoutMs()).toBe(90_000);
       process.env.OPENCLAW_QA_MATRIX_CANARY_TIMEOUT_MS = "nope";
+      expect(liveTesting.resolveMatrixQaCanaryTimeoutMs()).toBe(45_000);
+      process.env.OPENCLAW_QA_MATRIX_CANARY_TIMEOUT_MS = "0x1000";
       expect(liveTesting.resolveMatrixQaCanaryTimeoutMs()).toBe(45_000);
     } finally {
       if (previous === undefined) {
