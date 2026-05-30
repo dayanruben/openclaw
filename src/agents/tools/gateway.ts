@@ -1,3 +1,7 @@
+import {
+  GATEWAY_CLIENT_MODES,
+  GATEWAY_CLIENT_NAMES,
+} from "../../../packages/gateway-protocol/src/client-info.js";
 import { getRuntimeConfig, resolveGatewayPort } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { callGateway } from "../../gateway/call.js";
@@ -7,7 +11,6 @@ import {
   type OperatorScope,
 } from "../../gateway/method-scopes.js";
 import { getOperatorApprovalRuntimeToken } from "../../gateway/operator-approval-runtime-token.js";
-import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../../gateway/protocol/client-info.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -148,6 +151,7 @@ export function resolveGatewayOptions(opts?: GatewayCallOptions) {
 
 const APPROVAL_RUNTIME_METHODS = new Set<string>([
   "exec.approval.request",
+  "exec.approval.resolve",
   "exec.approval.waitDecision",
   "plugin.approval.request",
   "plugin.approval.waitDecision",

@@ -379,13 +379,16 @@ vi.mock("../../bootstrap-files.js", async () => {
   };
 });
 
-vi.mock("../../skills.js", () => ({
+vi.mock("../../../skills/runtime/env-overrides.js", () => ({
   applySkillEnvOverrides: () => () => {},
   applySkillEnvOverridesFromSnapshot: () => () => {},
+}));
+
+vi.mock("../../../skills/loading/workspace.js", () => ({
   resolveSkillsPromptForRun: (...args: unknown[]) => hoisted.resolveSkillsPromptForRunMock(...args),
 }));
 
-vi.mock("../skills-runtime.js", () => ({
+vi.mock("../../../skills/runtime/embedded-run-entries.js", () => ({
   resolveEmbeddedRunSkillEntries: (...args: unknown[]) =>
     hoisted.resolveEmbeddedRunSkillEntriesMock(...args),
 }));
@@ -524,7 +527,7 @@ vi.mock("../system-prompt.js", async () => {
     ...actual,
     applySystemPromptToSession: (session: MutableSession, systemPrompt: string) => {
       hoisted.systemPromptTexts.push(systemPrompt);
-      session.agent.state.systemPrompt = systemPrompt;
+      session.setBaseSystemPrompt(systemPrompt);
     },
     buildEmbeddedSystemPrompt: (params: unknown) => {
       hoisted.embeddedSystemPromptInputs.push(params);
@@ -776,6 +779,7 @@ vi.mock("../model.js", () => ({
 
 vi.mock("../sandbox-info.js", () => ({
   buildEmbeddedSandboxInfo: () => undefined,
+  resolveEmbeddedSandboxInfoExecPolicy: () => ({}),
 }));
 
 vi.mock("../thinking.js", () => ({
@@ -855,6 +859,7 @@ export type MutableSession = {
     prompt: string,
     options?: { images?: unknown[]; preflightResult?: (submitted: boolean) => void },
   ) => Promise<void>;
+  setBaseSystemPrompt: (systemPrompt: string) => void;
   sendCustomMessage: (
     message: {
       customType: string;
@@ -922,6 +927,7 @@ export function resetEmbeddedAttemptHarness(
   }
   hoisted.createAgentSessionMock.mockReset();
   hoisted.sessionManagerOpenMock.mockReset().mockReturnValue(hoisted.sessionManager);
+  hoisted.defaultResourceLoaderInitMock.mockReset();
   hoisted.resolveSandboxContextMock.mockReset();
   hoisted.ensureGlobalUndiciEnvProxyDispatcherMock.mockReset();
   hoisted.ensureGlobalUndiciDispatcherStreamTimeoutsMock.mockReset();
@@ -1063,6 +1069,9 @@ export function createDefaultEmbeddedSession(params?: {
       },
     },
     setActiveToolsByName: () => {},
+    setBaseSystemPrompt: (systemPrompt) => {
+      session.agent.state.systemPrompt = systemPrompt;
+    },
     prompt: async (prompt, options) => {
       await session.agent.prompt?.(prompt, options);
       if (params?.prompt) {
