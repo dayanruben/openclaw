@@ -3,6 +3,7 @@ import { t } from "../../i18n/index.ts";
 import {
   archiveWorkboardCard,
   deleteWorkboardCard,
+  dispatchWorkboard,
   findWorkboardSession,
   getWorkboardLifecycle,
   getWorkboardState,
@@ -23,6 +24,7 @@ import {
   type WorkboardTemplateId,
   type WorkboardUiState,
 } from "../controllers/workboard.ts";
+import { formatDateMs } from "../format.ts";
 import type { GatewayBrowserClient } from "../gateway.ts";
 import { icons } from "../icons.ts";
 import type { AgentsListResult, GatewaySessionRow } from "../types.ts";
@@ -94,10 +96,14 @@ function formatTime(value: number | undefined): string {
   if (!value) {
     return "";
   }
-  return new Date(value).toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-  });
+  return formatDateMs(
+    value,
+    {
+      month: "short",
+      day: "numeric",
+    },
+    "",
+  );
 }
 
 function canMutate(props: WorkboardProps): boolean {
@@ -116,6 +122,10 @@ function formatEventLabel(event: WorkboardEvent): string {
         : t("workboard.eventMoved");
     case "linked":
       return t("workboard.eventLinked");
+    case "specified":
+      return t("workboard.eventSpecified");
+    case "decomposed":
+      return t("workboard.eventDecomposed");
     case "claimed":
       return t("workboard.eventClaimed");
     case "heartbeat":
@@ -134,10 +144,18 @@ function formatEventLabel(event: WorkboardEvent): string {
       return t("workboard.eventProofAdded");
     case "artifact_added":
       return t("workboard.eventArtifactAdded");
+    case "attachment_added":
+      return t("workboard.eventAttachmentAdded");
     case "diagnostic":
       return t("workboard.eventDiagnostic");
     case "notification":
       return t("workboard.eventNotification");
+    case "dispatch":
+      return t("workboard.eventDispatch");
+    case "orchestration":
+      return t("workboard.eventOrchestration");
+    case "protocol_violation":
+      return t("workboard.eventProtocolViolation");
     case "archived":
       return t("workboard.eventArchived");
     case "unarchived":
@@ -192,6 +210,24 @@ function renderMetadataBadges(card: WorkboardCard) {
     metadata.artifacts?.length
       ? t("workboard.badgeArtifacts", { count: String(metadata.artifacts.length) })
       : null,
+    metadata.attachments?.length
+      ? t("workboard.badgeAttachments", { count: String(metadata.attachments.length) })
+      : null,
+    metadata.workerLogs?.length
+      ? t("workboard.badgeWorkerLogs", { count: String(metadata.workerLogs.length) })
+      : null,
+    metadata.workerProtocol?.state
+      ? t("workboard.badgeWorkerProtocol", { state: metadata.workerProtocol.state })
+      : null,
+    metadata.automation?.tenant
+      ? t("workboard.badgeTenant", { tenant: metadata.automation.tenant })
+      : null,
+    metadata.automation?.skills?.length
+      ? t("workboard.badgeSkills", { count: String(metadata.automation.skills.length) })
+      : null,
+    metadata.automation?.dispatchCount
+      ? t("workboard.badgeDispatches", { count: String(metadata.automation.dispatchCount) })
+      : null,
     metadata.claim ? t("workboard.badgeClaimed", { owner: metadata.claim.ownerId }) : null,
     metadata.diagnostics?.length
       ? t("workboard.badgeDiagnostics", { count: String(metadata.diagnostics.length) })
@@ -227,6 +263,13 @@ function matchesFilter(
     card.execution?.model,
     card.execution?.sessionKey,
     card.metadata?.templateId,
+    card.metadata?.automation?.tenant,
+    card.metadata?.automation?.idempotencyKey,
+    card.metadata?.automation?.workspace?.kind,
+    card.metadata?.automation?.workspace?.path,
+    card.metadata?.automation?.workspace?.branch,
+    ...(card.metadata?.automation?.skills ?? []),
+    ...(card.metadata?.automation?.createdCardIds ?? []),
     ...(card.metadata?.comments ?? []).map((comment) => comment.body),
     ...(card.metadata?.links ?? []).flatMap((link) => [link.title, link.url, link.targetCardId]),
     ...(card.metadata?.proof ?? []).flatMap((proof) => [
@@ -241,6 +284,14 @@ function matchesFilter(
       artifact.path,
       artifact.mimeType,
     ]),
+    ...(card.metadata?.attachments ?? []).flatMap((attachment) => [
+      attachment.fileName,
+      attachment.mimeType,
+      attachment.note,
+    ]),
+    ...(card.metadata?.workerLogs ?? []).map((log) => log.message),
+    card.metadata?.workerProtocol?.state,
+    card.metadata?.workerProtocol?.detail,
     card.metadata?.claim?.ownerId,
     ...(card.metadata?.diagnostics ?? []).flatMap((diagnostic) => [
       diagnostic.kind,
@@ -1103,6 +1154,22 @@ export function renderWorkboard(props: WorkboardProps) {
           >
             ${state.loading ? t("common.refreshing") : t("common.refresh")}
           </button>
+          ${writable
+            ? html`
+                <button
+                  class="btn"
+                  ?disabled=${state.loading}
+                  @click=${() =>
+                    dispatchWorkboard({
+                      host: props.host,
+                      client: props.client,
+                      requestUpdate: props.onRequestUpdate,
+                    })}
+                >
+                  ${icons.zap} ${t("workboard.dispatch")}
+                </button>
+              `
+            : nothing}
           <button
             class="btn"
             @click=${() => {

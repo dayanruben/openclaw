@@ -1,7 +1,7 @@
 import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js";
 import { hasAnyAuthProfileStoreSource } from "../../agents/auth-profiles/source-check.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/selection.js";
-import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../../agents/openai-codex-routing.js";
+import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../../agents/openai-routing.js";
 import { expandToolGroups, normalizeToolName } from "../../agents/tool-policy.js";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { CliDeps } from "../../cli/outbound-send-deps.js";
@@ -944,7 +944,10 @@ async function finalizeCronRun(params: {
   prepared.cronSession.sessionEntry.contextTokens = contextTokens;
   if (isCliProvider(providerUsed, prepared.cfgWithAgentDefaults)) {
     const cliSessionId = finalRunResult.meta?.agentMeta?.sessionId?.trim();
-    if (cliSessionId) {
+    if (finalRunResult.meta?.agentMeta?.clearCliSessionBinding === true) {
+      const { clearCliSession } = await loadCliRunnerRuntime();
+      clearCliSession(prepared.cronSession.sessionEntry, providerUsed);
+    } else if (cliSessionId) {
       const { setCliSessionId } = await loadCliRunnerRuntime();
       setCliSessionId(prepared.cronSession.sessionEntry, providerUsed, cliSessionId);
     }

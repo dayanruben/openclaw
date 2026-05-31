@@ -1,3 +1,4 @@
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { resolveAgentDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { resolveContextTokensForModel } from "../../agents/context.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/selection.js";
@@ -5,8 +6,7 @@ import {
   OPENAI_CODEX_PROVIDER_ID,
   OPENAI_PROVIDER_ID,
   resolveContextConfigProviderForRuntime,
-} from "../../agents/openai-codex-routing.js";
-import { normalizeProviderId } from "../../agents/provider-id.js";
+} from "../../agents/openai-routing.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
@@ -134,6 +134,7 @@ function resolveManualCompactContextTokenBudget(params: {
   const contextConfigProvider = resolveContextConfigProviderForRuntime({
     provider,
     runtimeId: harnessPolicy.runtime,
+    config: params.cfg,
   });
   const configuredContextTokens = resolveContextTokensForModel({
     cfg: params.cfg,
