@@ -17,16 +17,16 @@ import {
 } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  asDateTimestampMs,
+  resolveExpiresAtMsFromDurationMs,
+} from "@openclaw/normalization-core/number-coercion";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import { privateFileStoreSync } from "../../infra/private-file-store.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { hasGlobalHooks } from "../../plugins/hook-runner-global.js";
 import { PluginApprovalResolutions } from "../../plugins/types.js";
-import {
-  asDateTimestampMs,
-  resolveExpiresAtMsFromDurationMs,
-} from "../../shared/number-coercion.js";
 import {
   cancelDeferredPluginToolApproval,
   hasBeforeToolCallPolicy,
@@ -1192,7 +1192,7 @@ function postNativeHookRelayBridgeRecord(params: {
     const rejectOnce = (error: unknown) => {
       if (!settled) {
         settled = true;
-        reject(error);
+        reject(toLintErrorObject(error, "Non-Error rejection"));
       }
     };
     const req = httpRequest(
@@ -1316,7 +1316,9 @@ function nativeHookRelayBridgeKey(relayId: string): string {
 }
 
 function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
 }
 
 async function processNativeHookRelayInvocation(params: {
@@ -1521,12 +1523,12 @@ async function startNativeHookRelayPermissionApprovalWithBudget(params: {
     );
     return "defer";
   }
-  let approval!: Promise<NativeHookRelayPermissionApprovalResult>;
-  approval = nativeHookRelayPermissionApprovalRequester(params.request).finally(() => {
-    if (pendingPermissionApprovals.get(params.approvalKey) === approval) {
-      pendingPermissionApprovals.delete(params.approvalKey);
-    }
-  });
+  const approval: Promise<NativeHookRelayPermissionApprovalResult> =
+    nativeHookRelayPermissionApprovalRequester(params.request).finally(() => {
+      if (pendingPermissionApprovals.get(params.approvalKey) === approval) {
+        pendingPermissionApprovals.delete(params.approvalKey);
+      }
+    });
   pendingPermissionApprovals.set(params.approvalKey, approval);
   return approval;
 }
@@ -1643,7 +1645,7 @@ function updateJsonHash(hash: ReturnType<typeof createHash>, value: JsonValue): 
     const sortedKeySet = new Set(keys);
     hash.update("#object-tail:");
     for (const key in value) {
-      if (!Object.prototype.hasOwnProperty.call(value, key) || sortedKeySet.has(key)) {
+      if (!Object.hasOwn(value, key) || sortedKeySet.has(key)) {
         continue;
       }
       hash.update(JSON.stringify(key));
@@ -1662,7 +1664,7 @@ function readBoundedOwnKeys(
   const keys: string[] = [];
   let truncated = false;
   for (const key in value) {
-    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+    if (!Object.hasOwn(value, key)) {
       continue;
     }
     if (keys.length >= maxKeys) {
@@ -1976,7 +1978,7 @@ async function requestNativeHookRelayPermissionApproval(
     return "defer";
   }
   let decision: string | null | undefined;
-  if (Object.prototype.hasOwnProperty.call(requestResult ?? {}, "decision")) {
+  if (Object.hasOwn(requestResult ?? {}, "decision")) {
     decision = requestResult.decision;
   } else {
     const waitResult = await waitForNativeHookRelayApprovalDecision({
@@ -2015,10 +2017,10 @@ async function waitForNativeHookRelayApprovalDecision(params: {
   let onAbort: (() => void) | undefined;
   const abortPromise = new Promise<never>((_, reject) => {
     if (params.signal!.aborted) {
-      reject(params.signal!.reason);
+      reject(toLintErrorObject(params.signal!.reason, "Non-Error rejection"));
       return;
     }
-    onAbort = () => reject(params.signal!.reason);
+    onAbort = () => reject(toLintErrorObject(params.signal!.reason, "Non-Error rejection"));
     params.signal!.addEventListener("abort", onAbort, { once: true });
   });
   try {
@@ -2221,11 +2223,11 @@ function isJsonValue(value: unknown): value is JsonValue {
       continue;
     }
     if (Array.isArray(current.value)) {
-      for (let index = 0; index < current.value.length; index += 1) {
+      for (const valueLocal of current.value) {
         if (nodes + stack.length + 1 > MAX_NATIVE_HOOK_RELAY_JSON_NODES) {
           return false;
         }
-        stack.push({ value: current.value[index], depth: current.depth + 1 });
+        stack.push({ value: valueLocal, depth: current.depth + 1 });
       }
       continue;
     }
@@ -2234,7 +2236,7 @@ function isJsonValue(value: unknown): value is JsonValue {
     }
     try {
       for (const key in current.value) {
-        if (!Object.prototype.hasOwnProperty.call(current.value, key)) {
+        if (!Object.hasOwn(current.value, key)) {
           continue;
         }
         if (key.length > MAX_NATIVE_HOOK_RELAY_STRING_LENGTH) {
@@ -2329,3 +2331,17 @@ export const testing = {
   },
 } as const;
 export { testing as __testing };
+
+function toLintErrorObject(value: unknown, fallbackMessage: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  if (typeof value === "string") {
+    return new Error(value);
+  }
+  const error = new Error(fallbackMessage, { cause: value });
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    Object.assign(error, value);
+  }
+  return error;
+}

@@ -1,5 +1,5 @@
+import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MAX_TIMER_TIMEOUT_MS } from "../shared/number-coercion.js";
 import {
   formatOpenAIOAuthTlsPreflightFix,
   runOpenAIOAuthTlsPreflight,
@@ -97,16 +97,14 @@ describe("formatOpenAIOAuthTlsPreflightFix", () => {
 });
 
 describe("shouldRunOpenAIOAuthTlsPrerequisites", () => {
-  it("runs for pre-doctor legacy OpenAI OAuth profiles", () => {
-    const legacyOpenAIProvider = ["openai", "codex"].join("-");
-
+  it("runs for OpenAI OAuth profiles", () => {
     expect(
       shouldRunOpenAIOAuthTlsPrerequisites({
         cfg: {
           auth: {
             profiles: {
-              [`${legacyOpenAIProvider}:default`]: {
-                provider: legacyOpenAIProvider,
+              "openai:default": {
+                provider: "openai",
                 mode: "oauth",
               },
             },

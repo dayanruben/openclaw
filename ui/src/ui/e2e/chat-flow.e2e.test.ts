@@ -3,12 +3,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   canRunPlaywrightChromium,
   installMockGateway,
+  resolvePlaywrightChromiumExecutablePath,
   startControlUiE2eServer,
   type ControlUiE2eServer,
   type MockGatewayRequest,
 } from "../../test-helpers/control-ui-e2e.ts";
 
-const chromiumExecutablePath = chromium.executablePath();
+const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
 const chromiumAvailable = canRunPlaywrightChromium(chromiumExecutablePath);
 const allowMissingChromium = process.env.OPENCLAW_UI_E2E_ALLOW_MISSING_CHROMIUM === "1";
 const describeControlUiE2e = chromiumAvailable || !allowMissingChromium ? describe : describe.skip;
@@ -41,7 +42,9 @@ async function waitForRequests(
     if (requests.length >= count) {
       return requests;
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50);
+    });
   }
   throw new Error(`Timed out waiting for ${count} ${method} requests`);
 }
@@ -81,7 +84,7 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
       );
     }
     server = await startControlUiE2eServer();
-    browser = await chromium.launch();
+    browser = await chromium.launch({ executablePath: chromiumExecutablePath });
   });
 
   afterAll(async () => {
@@ -124,6 +127,53 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
       await gateway.emitChatFinal({ runId, text: "Harness verified." });
 
       await page.getByText("Harness verified.").waitFor({ timeout: 10_000 });
+    } finally {
+      await context.close();
+    }
+  });
+
+  it("keeps chat usable while sessions are still loading", async () => {
+    const context = await browser.newContext({
+      locale: "en-US",
+      serviceWorkers: "block",
+      viewport: { height: 900, width: 1280 },
+    });
+    const page = await context.newPage();
+    const gateway = await installMockGateway(page, {
+      deferredMethods: ["sessions.list"],
+      historyMessages: [
+        {
+          content: [{ text: "History renders before sessions finish.", type: "text" }],
+          role: "assistant",
+          timestamp: Date.now(),
+        },
+      ],
+    });
+
+    try {
+      await page.goto(`${server.baseUrl}chat`);
+
+      await page.getByText("History renders before sessions finish.").waitFor({ timeout: 10_000 });
+      const composer = page.locator(".agent-chat__composer-combobox textarea");
+      await composer.waitFor({ state: "visible", timeout: 10_000 });
+
+      await page.getByRole("button", { name: "Chat session" }).click();
+      const sessionsList = await gateway.waitForRequest("sessions.list");
+      expect(requireRecord(sessionsList.params)).toMatchObject({
+        includeGlobal: true,
+        includeUnknown: true,
+        limit: 50,
+      });
+
+      await composer.fill("draft while sessions load");
+      expect(await composer.inputValue()).toBe("draft while sessions load");
+      await composer.fill("");
+
+      await gateway.resolveDeferred("sessions.list");
+      await page.getByRole("option", { name: /Main/ }).waitFor({
+        state: "visible",
+        timeout: 10_000,
+      });
     } finally {
       await context.close();
     }
@@ -250,40 +300,51 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
       await page.goto(`${server.baseUrl}chat`);
 
       const main = page.getByRole("main");
-      const modelSelect = main.locator('select[data-chat-model-select="true"]');
-      await modelSelect.waitFor({ state: "visible", timeout: 10_000 });
-      expect(await modelSelect.inputValue()).toBe("");
+      const openModelSelect = async () => {
+        const trigger = main.locator('[data-chat-model-select="true"]').first();
+        await trigger.waitFor({ state: "visible", timeout: 10_000 });
+        return trigger;
+      };
+      const selectModel = async (value: string) => {
+        await main.locator('[data-chat-model-select="true"]').click();
+        const option = main.locator(`[data-chat-model-option="${value}"]`);
+        await option.waitFor({ state: "visible", timeout: 10_000 });
+        await option.click();
+      };
 
-      await modelSelect.selectOption("bedrock/claude-opus-4.5");
+      let modelSelect = await openModelSelect();
+      expect(await modelSelect.getAttribute("data-chat-select-value")).toBe("");
+
+      await selectModel("bedrock/claude-opus-4.5");
       const patchRequest = await gateway.waitForRequest("sessions.patch");
       expect(requireRecord(patchRequest.params)).toMatchObject({
         key: "agent:main:session-a",
         model: "bedrock/claude-opus-4.5",
       });
-      expect(await modelSelect.inputValue()).toBe("bedrock/claude-opus-4.5");
+      expect(await modelSelect.getAttribute("data-chat-select-value")).toBe(
+        "bedrock/claude-opus-4.5",
+      );
 
-      await main.getByRole("button", { name: "Chat session" }).click();
       await page
-        .locator(
-          'button[data-chat-session-picker-option="true"][data-session-key="agent:main:session-b"]',
-        )
+        .locator('a.sidebar-recent-session[data-session-key="agent:main:session-b"]')
         .click();
-      await main.getByRole("button", { name: "Chat session" }).getByText("Session B").waitFor({
+      await page.locator(".sidebar-recent-session--active").getByText("Session B").waitFor({
         timeout: 10_000,
       });
-      expect(await modelSelect.inputValue()).toBe("");
+      modelSelect = await openModelSelect();
+      expect(await modelSelect.getAttribute("data-chat-select-value")).toBe("");
 
-      await main.getByRole("button", { name: "Chat session" }).click();
       await page
-        .locator(
-          'button[data-chat-session-picker-option="true"][data-session-key="agent:main:session-a"]',
-        )
+        .locator('a.sidebar-recent-session[data-session-key="agent:main:session-a"]')
         .click();
-      await main.getByRole("button", { name: "Chat session" }).getByText("Session A").waitFor({
+      await page.locator(".sidebar-recent-session--active").getByText("Session A").waitFor({
         timeout: 10_000,
       });
 
-      expect(await modelSelect.inputValue()).toBe("bedrock/claude-opus-4.5");
+      modelSelect = await openModelSelect();
+      expect(await modelSelect.getAttribute("data-chat-select-value")).toBe(
+        "bedrock/claude-opus-4.5",
+      );
     } finally {
       await context.close();
     }

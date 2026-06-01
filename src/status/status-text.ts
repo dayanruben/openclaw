@@ -1,4 +1,5 @@
 import os from "node:os";
+import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import {
   resolveAgentConfig,
   resolveAgentDir,
@@ -32,7 +33,6 @@ import {
   loadProviderUsageSummary,
   resolveUsageProviderId,
 } from "../infra/provider-usage.js";
-import { normalizeOptionalLowercaseString } from "../shared/string-coerce.js";
 import {
   listTasksForAgentIdForStatus,
   listTasksForSessionKeyForStatus,
@@ -343,7 +343,11 @@ export async function buildStatusText(params: BuildStatusTextParams): Promise<st
         }
       });
       const usageEntry = usageSummary.providers[0];
-      if (usageEntry && !usageEntry.error && usageEntry.windows.length > 0) {
+      if (
+        usageEntry &&
+        !usageEntry.error &&
+        (usageEntry.windows.length > 0 || Boolean(usageEntry.summary?.trim()))
+      ) {
         const summaryLine = formatUsageWindowSummary(usageEntry, {
           now: Date.now(),
           maxWindows: 2,

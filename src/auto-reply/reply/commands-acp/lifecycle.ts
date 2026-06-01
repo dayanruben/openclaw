@@ -1,4 +1,9 @@
 import { randomUUID } from "node:crypto";
+import {
+  resolveAcpSessionCwd,
+  resolveAcpThreadSessionDetailLines,
+} from "@openclaw/acp-core/runtime/session-identifiers";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { getAcpSessionManager } from "../../../acp/control-plane/manager.js";
 import { resolveAcpSessionResolutionError } from "../../../acp/control-plane/manager.utils.js";
 import {
@@ -11,10 +16,6 @@ import {
   resolveAcpDispatchPolicyError,
   resolveAcpDispatchPolicyMessage,
 } from "../../../acp/policy.js";
-import {
-  resolveAcpSessionCwd,
-  resolveAcpThreadSessionDetailLines,
-} from "../../../acp/runtime/session-identifiers.js";
 import {
   resolveAcpSpawnRuntimePolicyError,
   resolveRuntimeCwdForAcpSpawn,
@@ -46,7 +47,6 @@ import {
   type SessionBindingRecord,
   type SessionBindingService,
 } from "../../../infra/outbound/session-binding-service.js";
-import { normalizeOptionalString } from "../../../shared/string-coerce.js";
 import type { ReplyPayload } from "../../types.js";
 import type { CommandHandlerResult, HandleCommandsParams } from "../commands-types.js";
 import {
@@ -542,7 +542,7 @@ export async function handleAcpSpawnAction(
     );
   }
 
-  let initializedBackend = "";
+  let initializedBackend;
   let initializedMeta: SessionAcpMeta | undefined;
   let initializedRuntime: AcpSpawnRuntimeCloseHandle | undefined;
   try {
@@ -860,7 +860,7 @@ export async function handleAcpCloseAction(
     commandParams: params,
     restTokens,
     run: async ({ acpManager, sessionKey }) => {
-      let runtimeNotice = "";
+      let runtimeNotice;
       try {
         const closed = await acpManager.closeSession({
           cfg: params.cfg,

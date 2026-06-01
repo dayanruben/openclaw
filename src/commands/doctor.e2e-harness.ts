@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { afterEach, beforeEach, vi } from "vitest";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
-import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
 import type { MockFn } from "../test-utils/vitest-mock-fn.js";
 import {
   readEmbeddedGatewayTokenForTest,
@@ -225,6 +225,11 @@ function createLegacyStateMigrationDetectionResult(params?: {
     taskStateSidecars: {
       taskRunsPath: "/tmp/state/tasks/runs.sqlite",
       flowRunsPath: "/tmp/state/flows/registry.sqlite",
+      hasLegacy: false,
+    },
+    deliveryQueues: {
+      outboundPath: "/tmp/state/delivery-queue",
+      sessionPath: "/tmp/state/session-delivery-queue",
       hasLegacy: false,
     },
     channelPlans: {

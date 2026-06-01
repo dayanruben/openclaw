@@ -1,4 +1,12 @@
 import {
+  asOptionalObjectRecord,
+  asOptionalRecord as readRecordField,
+} from "@openclaw/normalization-core/record-coerce";
+import {
+  normalizeOptionalLowercaseString,
+  readStringValue,
+} from "@openclaw/normalization-core/string-coerce";
+import {
   HEARTBEAT_RESPONSE_TOOL_NAME,
   normalizeHeartbeatToolResponse,
 } from "../auto-reply/heartbeat-tool-response.js";
@@ -19,11 +27,6 @@ import type { ExecApprovalDecision } from "../infra/exec-approvals.js";
 import { normalizeInteractiveReply, normalizeMessagePresentation } from "../interactive/payload.js";
 import type { PluginHookAfterToolCallEvent } from "../plugins/types.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
-import {
-  asOptionalObjectRecord,
-  asOptionalRecord as readRecordField,
-} from "../shared/record-coerce.js";
-import { normalizeOptionalLowercaseString, readStringValue } from "../shared/string-coerce.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { normalizeAcceptedSessionSpawnResult } from "./accepted-session-spawn.js";
 import { REQUIRED_PARAM_GROUPS, type RequiredParamGroup } from "./agent-tools.params.js";
@@ -284,6 +287,23 @@ function readToolResultDetailsRecord(result: unknown): Record<string, unknown> |
 function isAsyncStartedToolResult(result: unknown): boolean {
   const details = readToolResultDetailsRecord(result);
   return details?.async === true && details.status === "started";
+}
+
+function readAsyncStartedTaskIds(result: unknown): {
+  asyncTaskRunId?: string;
+  asyncTaskId?: string;
+} {
+  const details = readToolResultDetailsRecord(result);
+  if (!details) {
+    return {};
+  }
+  const nestedTask = readRecordField(details.task);
+  const asyncTaskRunId = readStringValue(details.runId) ?? readStringValue(nestedTask?.runId);
+  const asyncTaskId = readStringValue(details.taskId) ?? readStringValue(nestedTask?.taskId);
+  return {
+    ...(asyncTaskRunId ? { asyncTaskRunId } : {}),
+    ...(asyncTaskId ? { asyncTaskId } : {}),
+  };
 }
 
 function readExecToolDetails(result: unknown): ExecToolDetails | null {
@@ -1149,10 +1169,11 @@ export async function handleToolExecutionEnd(
   const completedMutatingAction = !isToolError && Boolean(callSummary?.mutatingAction);
   const meta = callSummary?.meta;
   const asyncStarted = !isToolError && isAsyncStartedToolResult(sanitizedResult);
+  const asyncTaskIds = asyncStarted ? readAsyncStartedTaskIds(sanitizedResult) : {};
   ctx.state.toolMetas.push({
     toolName,
     meta,
-    ...(asyncStarted ? { asyncStarted: true } : {}),
+    ...(asyncStarted ? { asyncStarted: true, ...asyncTaskIds } : {}),
   });
   const acceptedSessionSpawn =
     toolName === "sessions_spawn" && !isToolError
@@ -1533,7 +1554,7 @@ export async function handleToolExecutionEnd(
         runId,
         toolCallId,
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         ctx.log.warn(`after_tool_call hook failed: tool=${toolName} error=${String(err)}`);
       });
   }

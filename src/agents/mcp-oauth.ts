@@ -12,8 +12,8 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { resolveStateDir } from "../config/paths.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { sanitizeServerName } from "./agent-bundle-mcp-names.js";
 
 type McpOAuthStore = {
@@ -29,6 +29,14 @@ type McpOAuthConfig = {
   scope?: unknown;
   redirectUrl?: unknown;
   clientMetadataUrl?: unknown;
+};
+
+export type McpOAuthCredentialsStatus = {
+  hasTokens: boolean;
+  hasClientInformation: boolean;
+  hasCodeVerifier: boolean;
+  hasDiscoveryState: boolean;
+  hasLastAuthorizationUrl: boolean;
 };
 
 const DEFAULT_REDIRECT_URL = "http://127.0.0.1:8989/oauth/callback";
@@ -165,6 +173,20 @@ export async function clearMcpOAuthCredentials(params: {
   serverUrl: string;
 }): Promise<void> {
   await fs.rm(oauthStorePath(params.serverName, params.serverUrl), { force: true });
+}
+
+export async function readMcpOAuthCredentialsStatus(params: {
+  serverName: string;
+  serverUrl: string;
+}): Promise<McpOAuthCredentialsStatus> {
+  const store = await readStore(oauthStorePath(params.serverName, params.serverUrl));
+  return {
+    hasTokens: Boolean(store.tokens),
+    hasClientInformation: Boolean(store.clientInformation),
+    hasCodeVerifier: Boolean(store.codeVerifier),
+    hasDiscoveryState: Boolean(store.discoveryState),
+    hasLastAuthorizationUrl: Boolean(store.lastAuthorizationUrl),
+  };
 }
 
 export async function runMcpOAuthLogin(params: {

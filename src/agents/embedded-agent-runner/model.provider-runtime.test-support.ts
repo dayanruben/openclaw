@@ -1,4 +1,4 @@
-import { lowercasePreservingWhitespace } from "../../shared/string-coerce.js";
+import { lowercasePreservingWhitespace } from "@openclaw/normalization-core/string-coerce";
 import type { OpenRouterModelCapabilities } from "./openrouter-model-capabilities.js";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -169,6 +169,16 @@ function normalizeTransport(params: {
   ) {
     return {
       api: params.context.api,
+      baseUrl: GOOGLE_GENERATIVE_AI_BASE_URL,
+    };
+  }
+  if (
+    params.provider === "google" &&
+    params.context.api == null &&
+    params.context.baseUrl === "https://generativelanguage.googleapis.com"
+  ) {
+    return {
+      api: "google-generative-ai",
       baseUrl: GOOGLE_GENERATIVE_AI_BASE_URL,
     };
   }
