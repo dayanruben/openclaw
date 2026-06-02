@@ -1224,7 +1224,7 @@ function createRawOllamaStreamFn(
             id: model.id,
             reasoning: model.reasoning,
           };
-          const shouldEmitThinking = model.reasoning !== false;
+          const shouldEmitThinking = model.reasoning ?? true;
           const visibleContentSanitizer = createOllamaVisibleContentSanitizer(model.id);
           const cooperativeScheduler = createOllamaStreamCooperativeScheduler(options?.signal);
           let streamStarted = false;
