@@ -611,6 +611,7 @@ export const ar: TranslationMap = {
     labelsPlaceholder: "ui, docs",
     searchPlaceholder: "البحث في البطاقات",
     allPriorities: "كل الأولويات",
+    hideEmptyColumns: "Hide empty columns",
     emptyColumn: "أفلِت العمل هنا",
     lifecycleUnlinked: "لا توجد جلسة",
     lifecycleUnlinkedDetail: "ابدأ جلسة أو اربطها",
@@ -1328,6 +1329,17 @@ export const ar: TranslationMap = {
     },
     toolCards: {
       toolError: "خطأ في الأداة",
+    },
+    workspaceFiles: {
+      label: "Workspace files",
+      expand: "Expand workspace files",
+      collapse: "Collapse workspace files",
+      workspace: "Workspace",
+      files: "Files",
+      refresh: "Refresh files",
+      loading: "Loading files…",
+      empty: "No workspace files",
+      missing: "Missing",
     },
   },
   languages: {

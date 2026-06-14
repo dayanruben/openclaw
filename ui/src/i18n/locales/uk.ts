@@ -614,6 +614,7 @@ export const uk: TranslationMap = {
     labelsPlaceholder: "ui, docs",
     searchPlaceholder: "Шукати картки",
     allPriorities: "Усі пріоритети",
+    hideEmptyColumns: "Hide empty columns",
     emptyColumn: "Перетягніть роботу сюди",
     lifecycleUnlinked: "Немає сесії",
     lifecycleUnlinkedDetail: "Запустіть або пов’яжіть сесію",
@@ -1347,6 +1348,17 @@ export const uk: TranslationMap = {
     },
     toolCards: {
       toolError: "Помилка інструмента",
+    },
+    workspaceFiles: {
+      label: "Workspace files",
+      expand: "Expand workspace files",
+      collapse: "Collapse workspace files",
+      workspace: "Workspace",
+      files: "Files",
+      refresh: "Refresh files",
+      loading: "Loading files…",
+      empty: "No workspace files",
+      missing: "Missing",
     },
   },
   languages: {

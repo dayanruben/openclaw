@@ -613,6 +613,7 @@ export const es: TranslationMap = {
     labelsPlaceholder: "ui, docs",
     searchPlaceholder: "Buscar tarjetas",
     allPriorities: "Todas las prioridades",
+    hideEmptyColumns: "Hide empty columns",
     emptyColumn: "Suelta el trabajo aquí",
     lifecycleUnlinked: "Sin sesión",
     lifecycleUnlinkedDetail: "Inicia o vincula una sesión",
@@ -1350,6 +1351,17 @@ export const es: TranslationMap = {
     },
     toolCards: {
       toolError: "Error de herramienta",
+    },
+    workspaceFiles: {
+      label: "Workspace files",
+      expand: "Expand workspace files",
+      collapse: "Collapse workspace files",
+      workspace: "Workspace",
+      files: "Files",
+      refresh: "Refresh files",
+      loading: "Loading files…",
+      empty: "No workspace files",
+      missing: "Missing",
     },
   },
   languages: {

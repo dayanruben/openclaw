@@ -613,6 +613,7 @@ export const fa: TranslationMap = {
     labelsPlaceholder: "ui, docs",
     searchPlaceholder: "جستجوی کارت‌ها",
     allPriorities: "همه اولویت‌ها",
+    hideEmptyColumns: "Hide empty columns",
     emptyColumn: "کار را اینجا رها کنید",
     lifecycleUnlinked: "بدون جلسه",
     lifecycleUnlinkedDetail: "یک جلسه را شروع یا پیوند کنید",
@@ -1345,6 +1346,17 @@ export const fa: TranslationMap = {
     },
     toolCards: {
       toolError: "خطای ابزار",
+    },
+    workspaceFiles: {
+      label: "Workspace files",
+      expand: "Expand workspace files",
+      collapse: "Collapse workspace files",
+      workspace: "Workspace",
+      files: "Files",
+      refresh: "Refresh files",
+      loading: "Loading files…",
+      empty: "No workspace files",
+      missing: "Missing",
     },
   },
   languages: {
