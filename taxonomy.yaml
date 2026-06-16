@@ -9,6 +9,7 @@ profiles:
   - id: smoke-ci
     description: Deterministic PR and merge proof with mock model providers, synthetic qa-channel,
       and local SDK-backed channel upstreams; no live external service required.
+    evidenceMode: slim
     categoryIds:
       - agent-runtime-and-provider-execution.agent-turn-execution
       - session-memory-and-context-engine.token-management
@@ -9106,9 +9107,6 @@ surfaces:
           - name: Incomplete-turn recovery
             coverageIds: [incomplete-turn-recovery]
             description: Covers Incomplete-turn recovery across Gemini thinking-level mapping, adaptive thinking request shape, `thoughtSignature` capture/replay/sanitization, Google replay policy, and related thinking and turn recovery behavior.
-          - name: Planning-only turn recovery
-            coverageIds: [planning-only-turn-recovery]
-            description: Covers Planning-only turn recovery across Gemini thinking-level mapping, adaptive thinking request shape, `thoughtSignature` capture/replay/sanitization, Google replay policy, and related thinking and turn recovery behavior.
         docs:
           - docs/providers/google.md
           - docs/concepts/model-providers.md
@@ -9123,7 +9121,6 @@ surfaces:
           - Thinking-level mapping
           - Tool turn ordering
           - Incomplete-turn recovery
-          - Planning-only turn recovery
         category_note: direct-gemini-api-transport-streaming-and-multimodal-payloads.md
         human_lts_override: false
       - name: Media, Search, and Realtime
