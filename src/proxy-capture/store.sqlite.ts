@@ -5,6 +5,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { normalizeNullableString as normalizeObservedValue } from "@openclaw/normalization-core/string-coerce";
 import { normalizeUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
+import { applyPrivateModeSync } from "../infra/private-mode.js";
+import { resolveSqliteDatabaseFilePaths } from "../infra/sqlite-files.js";
 import {
   configureSqliteConnectionPragmas,
   type SqliteWalMaintenance,
@@ -23,8 +25,44 @@ import type {
 
 // SQLite-backed debug proxy store. Metadata stays in SQLite; large payloads are
 // compressed into the blob directory and referenced by hash.
+const DEBUG_PROXY_CAPTURE_DIR_MODE = 0o700;
+const DEBUG_PROXY_CAPTURE_FILE_MODE = 0o600;
+
+function isInMemoryDatabasePath(dbPath: string): boolean {
+  if (dbPath === ":memory:") {
+    return true;
+  }
+  if (!dbPath.startsWith("file:")) {
+    return false;
+  }
+  const fragmentIndex = dbPath.indexOf("#");
+  const uriWithoutFragment = fragmentIndex === -1 ? dbPath : dbPath.slice(0, fragmentIndex);
+  const queryIndex = uriWithoutFragment.indexOf("?");
+  const uriPath =
+    queryIndex === -1 ? uriWithoutFragment : uriWithoutFragment.slice(0, queryIndex);
+  try {
+    if (decodeURIComponent(uriPath.slice("file:".length)) === ":memory:") {
+      return true;
+    }
+  } catch {
+    // Malformed escapes cannot identify a memory URI; retain file-backed handling.
+  }
+  return (
+    queryIndex !== -1 &&
+    new URLSearchParams(uriWithoutFragment.slice(queryIndex + 1)).get("mode") === "memory"
+  );
+}
+
 function ensureParentDir(filePath: string) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: DEBUG_PROXY_CAPTURE_DIR_MODE });
+}
+
+function hardenDatabaseFiles(dbPath: string): void {
+  for (const candidate of resolveSqliteDatabaseFilePaths(dbPath)) {
+    if (fs.existsSync(candidate)) {
+      applyPrivateModeSync(candidate, DEBUG_PROXY_CAPTURE_FILE_MODE);
+    }
+  }
 }
 
 type OpenedDatabase = {
@@ -33,53 +71,72 @@ type OpenedDatabase = {
 };
 
 function openDatabase(dbPath: string): OpenedDatabase {
-  ensureParentDir(dbPath);
+  const fileBackedPath = isInMemoryDatabasePath(dbPath) ? undefined : dbPath;
+  if (fileBackedPath) {
+    ensureParentDir(fileBackedPath);
+    if (!fs.existsSync(fileBackedPath)) {
+      fs.closeSync(fs.openSync(fileBackedPath, "a", DEBUG_PROXY_CAPTURE_FILE_MODE));
+    }
+  }
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(dbPath);
-  const walMaintenance = configureSqliteConnectionPragmas(db, {
-    busyTimeoutMs: 5000,
-    databaseLabel: "debug-proxy-capture",
-    databasePath: dbPath,
-  });
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS capture_sessions (
-      id TEXT PRIMARY KEY,
-      started_at INTEGER NOT NULL,
-      ended_at INTEGER,
-      mode TEXT NOT NULL,
-      source_scope TEXT NOT NULL,
-      source_process TEXT NOT NULL,
-      proxy_url TEXT,
-      db_path TEXT NOT NULL,
-      blob_dir TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS capture_events (
-      id INTEGER PRIMARY KEY,
-      session_id TEXT NOT NULL,
-      ts INTEGER NOT NULL,
-      source_scope TEXT NOT NULL,
-      source_process TEXT NOT NULL,
-      protocol TEXT NOT NULL,
-      direction TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      flow_id TEXT NOT NULL,
-      method TEXT,
-      host TEXT,
-      path TEXT,
-      status INTEGER,
-      close_code INTEGER,
-      content_type TEXT,
-      headers_json TEXT,
-      data_text TEXT,
-      data_blob_id TEXT,
-      data_sha256 TEXT,
-      error_text TEXT,
-      meta_json TEXT
-    );
-    CREATE INDEX IF NOT EXISTS capture_events_session_ts_idx ON capture_events(session_id, ts);
-    CREATE INDEX IF NOT EXISTS capture_events_flow_idx ON capture_events(flow_id, ts);
-  `);
-  return { db, walMaintenance };
+  let walMaintenance: SqliteWalMaintenance | undefined;
+  try {
+    if (fileBackedPath) {
+      applyPrivateModeSync(fileBackedPath, DEBUG_PROXY_CAPTURE_FILE_MODE);
+    }
+    walMaintenance = configureSqliteConnectionPragmas(db, {
+      busyTimeoutMs: 5000,
+      databaseLabel: "debug-proxy-capture",
+      ...(fileBackedPath ? { databasePath: fileBackedPath } : {}),
+    });
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS capture_sessions (
+        id TEXT PRIMARY KEY,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        mode TEXT NOT NULL,
+        source_scope TEXT NOT NULL,
+        source_process TEXT NOT NULL,
+        proxy_url TEXT,
+        db_path TEXT NOT NULL,
+        blob_dir TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS capture_events (
+        id INTEGER PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        source_scope TEXT NOT NULL,
+        source_process TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        flow_id TEXT NOT NULL,
+        method TEXT,
+        host TEXT,
+        path TEXT,
+        status INTEGER,
+        close_code INTEGER,
+        content_type TEXT,
+        headers_json TEXT,
+        data_text TEXT,
+        data_blob_id TEXT,
+        data_sha256 TEXT,
+        error_text TEXT,
+        meta_json TEXT
+      );
+      CREATE INDEX IF NOT EXISTS capture_events_session_ts_idx ON capture_events(session_id, ts);
+      CREATE INDEX IF NOT EXISTS capture_events_flow_idx ON capture_events(flow_id, ts);
+    `);
+    if (fileBackedPath) {
+      hardenDatabaseFiles(fileBackedPath);
+    }
+    return { db, walMaintenance };
+  } catch (err) {
+    walMaintenance?.close();
+    db.close();
+    throw err;
+  }
 }
 
 function serializeJson(value: unknown): string | null {
