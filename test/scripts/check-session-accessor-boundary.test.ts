@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  findGatewaySessionCreateLifecycleViolations,
   findSessionAccessorBoundaryViolations,
+  findSessionCompactManualTrimBoundaryViolations,
   findSessionAccessorWriteBoundaryViolations,
+  findSessionLifecycleCleanupBoundaryViolations,
   findTranscriptWriterBoundaryViolations,
   migratedBundledPluginSessionAccessorFiles,
+  migratedSessionLifecycleCleanupFiles,
+  migratedSessionCompactManualTrimFiles,
   migratedSessionAccessorFiles,
   migratedSessionAccessorWriteFiles,
   migratedTranscriptWriterFiles,
@@ -38,6 +43,7 @@ describe("session accessor boundary guard", () => {
         "src/gateway/sessions-resolve.ts",
         "src/gateway/server-methods/sessions.ts",
         "src/infra/outbound/message-action-tts.ts",
+        "src/tui/embedded-backend.ts",
       ]),
     );
   });
@@ -52,7 +58,7 @@ describe("session accessor boundary guard", () => {
     );
   });
 
-  it("ratchets only the auto-reply files migrated to session accessor writes", () => {
+  it("ratchets only files migrated to session accessor writes", () => {
     expect(migratedSessionAccessorWriteFiles).toEqual(
       new Set([
         "src/agents/command/attempt-execution.shared.ts",
@@ -76,6 +82,8 @@ describe("session accessor boundary guard", () => {
         "src/auto-reply/reply/session-reset-model.ts",
         "src/auto-reply/reply/session-updates.ts",
         "src/auto-reply/reply/session-usage.ts",
+        "src/tui/embedded-backend.ts",
+        "src/config/sessions/cleanup-service.ts",
       ]),
     );
   });
@@ -89,6 +97,22 @@ describe("session accessor boundary guard", () => {
         "src/gateway/server-methods/chat.ts",
         "src/gateway/server-methods/chat-transcript-inject.ts",
         "src/sessions/user-turn-transcript.ts",
+      ]),
+    );
+  });
+
+  it("ratchets only compact manual trim gateway files", () => {
+    expect(migratedSessionCompactManualTrimFiles).toEqual(
+      new Set(["src/gateway/server-methods/sessions.ts"]),
+    );
+  });
+
+  it("ratchets only the lifecycle cleanup files migrated to backend cleanup", () => {
+    expect(migratedSessionLifecycleCleanupFiles).toEqual(
+      new Set([
+        "src/config/sessions/cleanup-service.ts",
+        "src/cron/session-reaper.ts",
+        "src/infra/heartbeat-runner.ts",
       ]),
     );
   });
@@ -237,6 +261,92 @@ describe("session accessor boundary guard", () => {
         publishTranscriptUpdate(scope, { messageId });
       `),
     ).toEqual([]);
+  });
+
+  it("flags legacy writers inside the gateway sessions.create lifecycle", () => {
+    expect(
+      findGatewaySessionCreateLifecycleViolations(`
+        const handlers = {
+          "sessions.create": async () => {
+            await updateSessionStore(storePath, () => undefined);
+            ensureSessionTranscriptFile(params);
+          },
+          "sessions.patch": async () => {
+            await updateSessionStore(storePath, () => undefined);
+          },
+        };
+      `),
+    ).toEqual([
+      { line: 4, reason: 'calls legacy sessions.create lifecycle writer "updateSessionStore"' },
+      {
+        line: 5,
+        reason: 'calls legacy sessions.create lifecycle writer "ensureSessionTranscriptFile"',
+      },
+    ]);
+  });
+
+  it("allows the gateway sessions.create lifecycle accessor seam", () => {
+    expect(
+      findGatewaySessionCreateLifecycleViolations(`
+        const handlers = {
+          "sessions.create": async () => {
+            await createSessionEntryWithTranscript(scope, createEntry);
+          },
+        };
+      `),
+    ).toEqual([]);
+  });
+
+  it("flags gateway manual compact trim file mutations", () => {
+    expect(
+      findSessionCompactManualTrimBoundaryViolations(`
+        import { archiveFileOnDisk } from "../session-utils.js";
+        import { readRecentSessionTranscriptLines } from "../session-transcript-readers.js";
+        const tail = readRecentSessionTranscriptLines(scope);
+        const archived = archiveFileOnDisk(filePath, "bak");
+      `),
+    ).toEqual([
+      { line: 2, reason: 'imports legacy session store manual compact trim "archiveFileOnDisk"' },
+      {
+        line: 3,
+        reason:
+          'imports legacy session store manual compact trim "readRecentSessionTranscriptLines"',
+      },
+      {
+        line: 4,
+        reason: 'calls legacy session store manual compact trim "readRecentSessionTranscriptLines"',
+      },
+      { line: 5, reason: 'calls legacy session store manual compact trim "archiveFileOnDisk"' },
+    ]);
+  });
+
+  it("flags direct lifecycle cleanup helper usage", () => {
+    expect(
+      findSessionLifecycleCleanupBoundaryViolations(`
+        import { archiveRemovedSessionTranscripts } from "../config/sessions/store.js";
+        import { cleanupArchivedSessionTranscripts } from "../gateway/session-utils.fs.js";
+        archiveRemovedSessionTranscripts({ removedSessionFiles, referencedSessionIds, storePath, reason: "deleted" });
+        cleanupArchivedSessionTranscripts({ directories, rules });
+      `),
+    ).toEqual([
+      {
+        line: 2,
+        reason: 'imports legacy session store lifecycle cleanup "archiveRemovedSessionTranscripts"',
+      },
+      {
+        line: 3,
+        reason:
+          'imports legacy session store lifecycle cleanup "cleanupArchivedSessionTranscripts"',
+      },
+      {
+        line: 4,
+        reason: 'calls legacy session store lifecycle cleanup "archiveRemovedSessionTranscripts"',
+      },
+      {
+        line: 5,
+        reason: 'calls legacy session store lifecycle cleanup "cleanupArchivedSessionTranscripts"',
+      },
+    ]);
   });
 
   it("ignores comments and strings that describe legacy readers", () => {
