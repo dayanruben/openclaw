@@ -1,4 +1,5 @@
 // Dev Tooling Safety tests cover dev tooling safety script behavior.
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -205,6 +206,45 @@ describe("script-specific dev tooling hardening", () => {
     expect(calls).toBe(1);
   });
 
+  it("prints TUI PTY watch usage without launching the watcher", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "scripts/dev/tui-pty-test-watch.ts", "--help"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Usage: node --import tsx scripts/dev/tui-pty-test-watch.ts");
+    expect(result.stderr).toBe("");
+  });
+
+  it("rejects unknown TUI PTY watch args before launching the watcher", () => {
+    expect(() => tuiPtyWatchTesting.parseOptions(["--wat"])).toThrow("Unknown argument: --wat");
+
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "scripts/dev/tui-pty-test-watch.ts", "--wat"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toBe("Unknown argument: --wat");
+    expect(result.stdout).toBe("");
+  });
+
+  it("keeps TUI PTY watch vitest args behind the separator", () => {
+    expect(tuiPtyWatchTesting.parseOptions(["--mode", "all", "--", "--help"])).toMatchObject({
+      mode: "all",
+      vitestArgs: ["--help"],
+    });
+  });
+
   it("escalates stalled TUI PTY watch children after interrupt cleanup", async () => {
     vi.useFakeTimers();
     const signals: NodeJS.Signals[] = [];
@@ -368,6 +408,30 @@ describe("script-specific dev tooling hardening", () => {
     await expect(
       realtimeSmokeTesting.readBoundedText(response, "OpenAI Realtime test", maxBytes),
     ).rejects.toThrow(`OpenAI Realtime test response body exceeded ${maxBytes} bytes`);
+  });
+
+  it("rejects unsafe OpenAI realtime SDP answer content-length values before reading", async () => {
+    const maxBytes = realtimeSmokeTesting.OPENAI_HTTP_RESPONSE_MAX_BYTES;
+    const body = {
+      cancel: vi.fn(() => Promise.resolve()),
+      getReader: vi.fn(() => {
+        throw new Error("reader should not be acquired");
+      }),
+    };
+    const response = {
+      headers: new Headers({ "content-length": "9007199254740993" }),
+      body,
+    } as unknown as Response;
+
+    await expect(
+      realtimeSmokeTesting.readOpenAIRealtimeBrowserResponseText(
+        response,
+        "OpenAI Realtime SDP answer",
+        maxBytes,
+      ),
+    ).rejects.toThrow(`OpenAI Realtime SDP answer response body exceeded ${maxBytes} bytes`);
+    expect(body.getReader).not.toHaveBeenCalled();
+    expect(body.cancel).toHaveBeenCalledTimes(1);
   });
 
   it("bounds OpenAI realtime smoke response body reads by streamed bytes", async () => {
