@@ -3,9 +3,9 @@
  */
 import crypto from "node:crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { createAbortError as createNamedAbortError } from "../../infra/abort-signal.js";
 import type { ReplyBackendHandle } from "../../auto-reply/reply/reply-run-registry.js";
 import type { CliBackendConfig } from "../../config/types.js";
+import { createAbortError as createNamedAbortError } from "../../infra/abort-signal.js";
 import {
   emitTrustedDiagnosticEvent,
   type DiagnosticToolParamsSummary,
@@ -33,6 +33,7 @@ import {
   type CliStreamJsonOutputLimits,
   type CliStreamingDelta,
   type CliThinkingDelta,
+  type CliThinkingProgress,
   type CliToolResultDelta,
   type CliToolUseStartDelta,
   resolveCliStreamJsonOutputLimits,
@@ -875,13 +876,17 @@ function handleClaudeLiveLine(session: ClaudeLiveSession, line: string): void {
     return;
   }
   const raw = turn.rawLines.join("\n");
-  const output = parseCliOutput({
-    raw,
-    backend: turn.backend,
-    providerId: session.providerId,
-    outputMode: "jsonl",
-    fallbackSessionId: turn.sessionId,
-  });
+  // Reuse the parser that classified pre-tool text as commentary. Reparsing the
+  // transcript loses that boundary when Claude's terminal result is empty.
+  const output =
+    turn.streamingParser.getOutput() ??
+    parseCliOutput({
+      raw,
+      backend: turn.backend,
+      providerId: session.providerId,
+      outputMode: "jsonl",
+      fallbackSessionId: turn.sessionId,
+    });
   if (output.errorText) {
     failTurn(session, createParsedOutputError(session, output));
     scheduleIdleClose(session);
@@ -1099,6 +1104,7 @@ function createTurn(params: {
   noOutputTimeoutMs: number;
   onAssistantDelta: (delta: CliStreamingDelta) => void;
   onThinkingDelta?: (delta: CliThinkingDelta) => void;
+  onThinkingProgress?: (progress: CliThinkingProgress) => void;
   onToolUseStart?: (delta: CliToolUseStartDelta) => void;
   onToolResult?: (delta: CliToolResultDelta) => void;
   onCommentaryText?: (text: string) => void;
@@ -1128,6 +1134,7 @@ function createTurn(params: {
       providerId: params.context.backendResolved.id,
       onAssistantDelta: params.onAssistantDelta,
       onThinkingDelta: params.onThinkingDelta,
+      onThinkingProgress: params.onThinkingProgress,
       onToolUseStart: params.onToolUseStart,
       onToolResult: params.onToolResult,
       onCommentaryText: params.onCommentaryText,
@@ -1200,6 +1207,7 @@ export async function runClaudeLiveSessionTurn(params: {
   getProcessSupervisor: () => ProcessSupervisor;
   onAssistantDelta: (delta: CliStreamingDelta) => void;
   onThinkingDelta?: (delta: CliThinkingDelta) => void;
+  onThinkingProgress?: (progress: CliThinkingProgress) => void;
   onToolUseStart?: (delta: CliToolUseStartDelta) => void;
   onToolResult?: (delta: CliToolResultDelta) => void;
   onCommentaryText?: (text: string) => void;
@@ -1324,6 +1332,7 @@ export async function runClaudeLiveSessionTurn(params: {
       noOutputTimeoutMs: params.noOutputTimeoutMs,
       onAssistantDelta: params.onAssistantDelta,
       onThinkingDelta: params.onThinkingDelta,
+      onThinkingProgress: params.onThinkingProgress,
       onToolUseStart: params.onToolUseStart,
       onToolResult: params.onToolResult,
       onCommentaryText: params.onCommentaryText,

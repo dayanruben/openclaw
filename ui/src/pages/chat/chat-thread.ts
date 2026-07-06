@@ -1,4 +1,8 @@
 // Control UI chat module owns Chat thread item derivation and thread-local caches.
+import {
+  isToolCallContentType,
+  isToolResultContentType,
+} from "../../../../src/chat/tool-content.js";
 import type {
   ChatItem,
   MessageGroup,
@@ -22,7 +26,7 @@ import {
 } from "../../lib/chat/heartbeat-display.ts";
 import { extractTextCached } from "../../lib/chat/message-extract.ts";
 import {
-  isToolResultMessage,
+  isStandaloneToolMessageForDisplay,
   normalizeMessage,
   stripMessageDisplayMetadataText,
 } from "../../lib/chat/message-normalizer.ts";
@@ -283,8 +287,106 @@ function groupMessages(items: ChatItem[]): Array<ChatItem | MessageGroup> {
   return result;
 }
 
+function mergeToolCallResultPair(callItem: ChatItem, resultItem: ChatItem): ChatItem | null {
+  if (callItem.kind !== "message" || resultItem.kind !== "message") {
+    return null;
+  }
+  const callMessage = asRecord(callItem.message);
+  const resultMessage = asRecord(resultItem.message);
+  if (!callMessage || !resultMessage) {
+    return null;
+  }
+  const callRole = typeof callMessage.role === "string" ? callMessage.role.toLowerCase() : "";
+  const normalizedResult = safeNormalizeMessage(resultItem.message);
+  const resultRole = normalizedResult ? normalizeRoleForGrouping(normalizedResult.role) : "unknown";
+  if (callRole !== "assistant" || resultRole !== "tool" || !Array.isArray(callMessage.content)) {
+    return null;
+  }
+  const hasToolCallBlock = callMessage.content.some((block) =>
+    isToolCallContentType(asRecord(block)?.type),
+  );
+  if (!hasToolCallBlock) {
+    return null;
+  }
+
+  const callCards = extractToolCardsCached(callItem.message, `${callItem.key}:activity-call`);
+  const resultCards = extractToolCardsCached(
+    resultItem.message,
+    `${resultItem.key}:activity-result`,
+  );
+  if (callCards.length !== 1 || resultCards.length !== 1) {
+    return null;
+  }
+  const [callCard] = callCards;
+  const [resultCard] = resultCards;
+  const resultName = resultCard.name === "tool" ? callCard.name : resultCard.name;
+  const rawResultContent = Array.isArray(resultMessage.content) ? resultMessage.content : [];
+  const resultOnlyContent = rawResultContent.filter(
+    (block) => !isToolCallContentType(asRecord(block)?.type),
+  );
+  const hasToolResultBlock = resultOnlyContent.some((block) =>
+    isToolResultContentType(asRecord(block)?.type),
+  );
+  const hasToolResult =
+    hasToolResultBlock || resultCard.outputText !== undefined || resultCard.isError !== undefined;
+  if (
+    !callCard.callId ||
+    callCard.callId !== resultCard.callId ||
+    !hasToolResult ||
+    normalizeLowercaseStringOrEmpty(callCard.name) !== normalizeLowercaseStringOrEmpty(resultName)
+  ) {
+    return null;
+  }
+
+  const preservedResultContent = resultOnlyContent.filter(
+    (block) => asRecord(block)?.type !== "text",
+  );
+  const resultContent = hasToolResultBlock
+    ? resultOnlyContent
+    : [
+        {
+          type: "tool_result",
+          id: resultCard.callId,
+          name: resultName,
+          text: resultCard.outputText ?? "",
+          ...(resultCard.isError !== undefined ? { isError: resultCard.isError } : {}),
+        },
+        ...preservedResultContent,
+      ];
+  const resultError = resultMessage.isError ?? resultMessage.is_error;
+  return {
+    ...callItem,
+    message: {
+      ...callMessage,
+      content: [...callMessage.content, ...resultContent],
+      ...(typeof resultError === "boolean" ? { isError: resultError } : {}),
+    },
+  };
+}
+
+function coalesceToolActivityMessages(items: ChatItem[]): ChatItem[] {
+  const coalesced: ChatItem[] = [];
+  for (const item of items) {
+    const previous = coalesced[coalesced.length - 1];
+    const merged = previous ? mergeToolCallResultPair(previous, item) : null;
+    if (merged) {
+      coalesced[coalesced.length - 1] = merged;
+    } else {
+      coalesced.push(item);
+    }
+  }
+  return coalesced;
+}
+
 function assistantGroupHasReplyText(group: MessageGroup): boolean {
   return group.messages.some(({ message }) => Boolean(extractTextCached(message)?.trim()));
+}
+
+function assistantGroupIsForwardedBoundary(group: MessageGroup): boolean {
+  return group.messages.some(({ message }) => {
+    const provenance = asRecord(asRecord(message)?.provenance);
+    return provenance?.kind === "inter_session" && provenance.sourceTool === "sessions_send";
+  });
 }
 
 function annotateToolTurnOutcome(
@@ -300,7 +402,11 @@ function annotateToolTurnOutcome(
     if (role === "user") {
       sawAssistantReply = false;
     } else if (role === "assistant") {
-      if (assistantGroupHasReplyText(item)) {
+      if (assistantGroupIsForwardedBoundary(item)) {
+        // Gateway preserves sessions_send provenance when projecting inputs as assistant groups.
+        // Those groups start a new autonomous turn; they are not replies to an earlier tool.
+        sawAssistantReply = false;
+      } else if (assistantGroupHasReplyText(item)) {
         sawAssistantReply = true;
       }
     } else if (role === "tool") {
@@ -940,7 +1046,11 @@ export function buildChatItems(props: BuildChatItemsProps): Array<ChatItem | Mes
   }
 
   return annotateToolTurnOutcome(
-    groupMessages(collapseSequentialDuplicateMessages(sortChatItemsByVisibleTime(items))),
+    groupMessages(
+      collapseSequentialDuplicateMessages(
+        coalesceToolActivityMessages(sortChatItemsByVisibleTime(items)),
+      ),
+    ),
   );
 }
 
@@ -1055,17 +1165,7 @@ export function syncToolCardExpansionState(
         expanded.set(disclosureId, autoExpandToolCalls);
         initialized.add(disclosureId);
       }
-      const messageRecord = entry.message as Record<string, unknown>;
-      const role = typeof messageRecord.role === "string" ? messageRecord.role : "unknown";
-      const normalizedRole = normalizeRoleForGrouping(role);
-      const isToolMessage =
-        isToolResultMessage(entry.message) ||
-        normalizedRole === "tool" ||
-        role.toLowerCase() === "toolresult" ||
-        role.toLowerCase() === "tool_result" ||
-        typeof messageRecord.toolCallId === "string" ||
-        typeof messageRecord.tool_call_id === "string";
-      if (!isToolMessage) {
+      if (!isStandaloneToolMessageForDisplay(entry.message)) {
         continue;
       }
       const disclosureId = `toolmsg:${entry.key}`;

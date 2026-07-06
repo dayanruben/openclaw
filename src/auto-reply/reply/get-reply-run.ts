@@ -1363,6 +1363,7 @@ export async function runPreparedReply(
     ...(queuedFollowupAbortSignal ? { abortSignal: queuedFollowupAbortSignal } : {}),
     deliveryCorrelations: opts?.queuedDeliveryCorrelations,
     queuedLifecycle: opts?.queuedFollowupLifecycle,
+    onFollowupAdmissionWaitChange: opts?.onFollowupAdmissionWaitChange,
     messageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,
     summaryLine: baseBodyTrimmedRaw,
     enqueuedAt: Date.now(),
@@ -1374,12 +1375,9 @@ export async function runPreparedReply(
     originatingAccountId: replyRoute.accountId,
     originatingThreadId: replyRoute.threadId ?? originatingThreadId,
     originatingReplyToId: promptSessionCtx.ReplyToId,
-    originatingReplyToMode: resolveReplyToMode(
-      cfg,
-      replyPolicyChannel,
-      replyRoute.accountId,
-      replyRoute.chatType,
-    ),
+    originatingReplyToMode:
+      promptSessionCtx.ReplyToMode ??
+      resolveReplyToMode(cfg, replyPolicyChannel, replyRoute.accountId, replyRoute.chatType),
     originatingChatId:
       normalizeOptionalString(sessionCtx.NativeChannelId) ??
       normalizeOptionalString(sessionCtx.ChatId),

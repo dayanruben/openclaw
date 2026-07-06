@@ -79,6 +79,10 @@ final class RemotePortTunnel: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Remote mode is not configured"])
         }
 
+        // Reap orphans from crashed instances before picking a port, otherwise a dead
+        // session's tunnel squats the preferred port and forces an ephemeral one.
+        await PortGuardian.shared.reapOrphanedTunnels()
+
         let localPort = try await Self.findPort(
             preferred: preferredLocalPort,
             allowRandom: allowRandomLocalPort)
@@ -109,6 +113,7 @@ final class RemotePortTunnel: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = args
+        process.environment = CommandResolver.sshEnvironment()
 
         let pipe = Pipe()
         process.standardError = pipe

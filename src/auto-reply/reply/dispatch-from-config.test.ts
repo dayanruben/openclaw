@@ -1466,7 +1466,7 @@ describe("dispatchReplyFromConfig", () => {
 
   it.each([
     ["embedded", { assistantMessageIndex: 7 }],
-    ["CLI", { assistantTranscriptOwned: true }],
+    ["runtime-owned", { assistantTranscriptOwned: true }],
   ])("does not mirror %s finals with a runtime transcript owner", async (_name, metadata) => {
     setNoAbort();
     const dispatcher = createDispatcher();
@@ -2181,16 +2181,16 @@ describe("dispatchReplyFromConfig", () => {
       dispatcher,
       replyResolver,
     });
+    let settled = false;
+    void resultPromise.finally(() => {
+      settled = true;
+    });
 
     try {
-      const result = await Promise.race([
-        resultPromise,
-        new Promise<"blocked">((resolve) => {
-          setTimeout(() => resolve("blocked"), 1_000);
-        }),
-      ]);
-
-      expect(result).toBe("blocked");
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(settled).toBe(false);
       expect(replyResolver).not.toHaveBeenCalled();
     } finally {
       activeOperation.complete();
