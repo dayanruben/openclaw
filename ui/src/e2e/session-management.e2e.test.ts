@@ -364,6 +364,142 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await context.close();
     }
   });
+
+  it("dismisses fixed session menus before the sidebar or drawer hides", async () => {
+    const context = await browser.newContext({
+      locale: "en-US",
+      serviceWorkers: "block",
+      viewport: { height: 900, width: 1280 },
+    });
+    const page = await context.newPage();
+    const gateway = await installMockGateway(page, {
+      methodResponses: {
+        "sessions.list": sessionsListResponse([
+          sessionRow("agent:main:main", "Main", Date.parse("2026-07-01T16:00:00.000Z")),
+          sessionRow(
+            "agent:main:research",
+            "Research notes",
+            Date.parse("2026-07-01T15:00:00.000Z"),
+          ),
+        ]),
+        "sessions.patch": {},
+      },
+      sessionKey: "agent:main:main",
+    });
+    const dialogs: string[] = [];
+    page.on("dialog", (dialog) => {
+      dialogs.push(dialog.message());
+      void dialog.dismiss();
+    });
+
+    try {
+      await page.goto(`${server.baseUrl}chat`);
+      const sidebar = page.locator("openclaw-app-sidebar");
+      const row = sidebar.locator(
+        '.sidebar-recent-session[data-session-key="agent:main:research"]',
+      );
+      const shell = page.locator(".shell");
+      const shellNav = page.locator(".shell-nav");
+      const collapseButton = sidebar
+        .locator(".sidebar-brand")
+        .getByRole("button", { name: "Collapse sidebar" });
+      const expandButton = page.locator(".shell-nav-expand");
+      const drawerToggle = page.locator(".topbar-nav-toggle");
+      const sessionMenu = page.getByRole("menu", { name: "Actions for Research notes" });
+      await row.waitFor({ state: "visible", timeout: 10_000 });
+
+      const openSessionMenu = async () => {
+        await row.hover();
+        await row.getByRole("button", { name: "Open session menu" }).click();
+        await page
+          .getByRole("menu", { name: "Actions for Research notes" })
+          .waitFor({ state: "visible" });
+      };
+      const expectDesktopCollapsed = async () => {
+        await expect.poll(() => sidebar.isVisible()).toBe(false);
+        await expect.poll(() => expandButton.isVisible()).toBe(true);
+        await expect
+          .poll(() => expandButton.evaluate((element) => element === document.activeElement))
+          .toBe(true);
+      };
+      const expectDrawerClosed = async () => {
+        await expect
+          .poll(() => shell.getAttribute("class"))
+          .not.toContain("shell--nav-drawer-open");
+        await expect
+          .poll(() => shellNav.evaluate((element) => element.getBoundingClientRect().right))
+          .toBeLessThanOrEqual(0);
+      };
+      const hiddenActionCounts = async () => ({
+        dialogs: dialogs.length,
+        patches: (await gateway.getRequests("sessions.patch")).length,
+      });
+      const expectHiddenShortcutsInert = async (
+        before: Awaited<ReturnType<typeof hiddenActionCounts>>,
+      ) => {
+        for (const shortcut of ["p", "a", "d"] as const) {
+          await page.keyboard.press(shortcut);
+        }
+        await page.evaluate(
+          () =>
+            new Promise<void>((resolve) => {
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+            }),
+        );
+        expect(await hiddenActionCounts()).toEqual(before);
+      };
+
+      // Keyboard collapse bypasses the menu's outside-pointer handler. The shell
+      // must explicitly unmount it before the sidebar becomes display:none.
+      await openSessionMenu();
+      const beforeKeyboardCollapse = await hiddenActionCounts();
+      await page.keyboard.press("Meta+B");
+      await expectDesktopCollapsed();
+      await expect.poll(() => sessionMenu.count()).toBe(0);
+      await expectHiddenShortcutsInert(beforeKeyboardCollapse);
+
+      await expandButton.click();
+      await expect.poll(() => sidebar.isVisible()).toBe(true);
+
+      // The visible desktop control follows the same focus handoff contract.
+      await openSessionMenu();
+      await collapseButton.click();
+      await expectDesktopCollapsed();
+      await expect.poll(() => sessionMenu.count()).toBe(0);
+      await expandButton.click();
+      await expect.poll(() => sidebar.isVisible()).toBe(true);
+
+      // Crossing into drawer layout hides the desktop sidebar without toggling
+      // persisted collapse state, so resize owns this dismissal and focus move.
+      await openSessionMenu();
+      const beforeNarrowTransition = await hiddenActionCounts();
+      await page.setViewportSize({ height: 900, width: 900 });
+      await expectDrawerClosed();
+      await expect.poll(() => sessionMenu.count()).toBe(0);
+      await expect
+        .poll(() => drawerToggle.evaluate((element) => element === document.activeElement))
+        .toBe(true);
+      await expectHiddenShortcutsInert(beforeNarrowTransition);
+
+      await drawerToggle.click();
+      await expect.poll(() => shell.getAttribute("class")).toContain("shell--nav-drawer-open");
+      await expect
+        .poll(() => shellNav.evaluate((element) => element.getBoundingClientRect().left))
+        .toBe(0);
+      await openSessionMenu();
+      const beforeDrawerCollapse = await hiddenActionCounts();
+      await page.keyboard.press("Meta+B");
+      await expectDrawerClosed();
+      await expect.poll(() => sessionMenu.count()).toBe(0);
+      await expect
+        .poll(() => drawerToggle.evaluate((element) => element === document.activeElement))
+        .toBe(true);
+      await expectHiddenShortcutsInert(beforeDrawerCollapse);
+    } finally {
+      await context.close();
+    }
+  });
+
   it("archives a session from the Sessions page context menu and kebab", async () => {
     const context = await browser.newContext({
       locale: "en-US",
@@ -521,6 +657,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
         "sessions.patch": {},
       },
       sessionKey: "agent:main:main",
+      sessionGroups: ["Apps", "Research"],
     });
 
     try {
@@ -533,8 +670,8 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await expect.poll(() => researchGroup.locator(".sidebar-recent-session").count()).toBe(2);
       await captureUiProof(page, "sidebar-session-groups.png");
 
-      // Rename group: every member session is patched, including the archived
-      // row that only the unbounded archived list window can see.
+      // Rename group: the gateway renames the catalog entry and repoints every
+      // member session server-side (sessions.groups.rename), no per-member patches.
       const groupMenuButton = researchGroup.getByRole("button", {
         name: "Group options for Research",
       });
@@ -544,13 +681,11 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await captureUiProof(page, "sidebar-group-menu.png");
       page.once("dialog", (dialog) => void dialog.accept("Projects"));
       await page.getByRole("menuitem", { name: "Rename group…" }).click();
-      for (const key of ["agent:main:paper-a", "agent:main:paper-b", "agent:main:old-notes"]) {
-        const patch = await waitForPatch(
-          gateway,
-          (params) => params.key === key && params.category === "Projects",
-        );
-        expect(requireRecord(patch.params)).toMatchObject({ category: "Projects", key });
-      }
+      const renameRequest = await gateway.waitForRequest("sessions.groups.rename");
+      expect(requireRecord(renameRequest.params)).toMatchObject({
+        name: "Research",
+        to: "Projects",
+      });
       await expect
         .poll(() =>
           page
@@ -560,10 +695,11 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
             ),
         )
         .toEqual(["category:Apps", "category:Projects"]);
-
-      // Delete group: sessions survive and move back to Ungrouped.
       const projectsGroup = groups.filter({ hasText: "Projects" });
-      await projectsGroup.waitFor({ state: "visible" });
+      await expect.poll(() => projectsGroup.locator(".sidebar-recent-session").count()).toBe(2);
+
+      // Delete group: the gateway drops the catalog entry and moves member
+      // sessions back to Chats server-side (sessions.groups.delete).
       const projectsMenuButton = projectsGroup.getByRole("button", {
         name: "Group options for Projects",
       });
@@ -571,14 +707,22 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       page.once("dialog", (dialog) => void dialog.accept());
       await projectsMenuButton.click();
       await page.getByRole("menuitem", { name: "Delete group…" }).click();
-      const dissolvePatch = await waitForPatch(
-        gateway,
-        (params) => params.key === "agent:main:paper-a" && params.category === null,
-      );
-      expect(requireRecord(dissolvePatch.params)).toMatchObject({
-        category: null,
-        key: "agent:main:paper-a",
-      });
+      const deleteRequest = await gateway.waitForRequest("sessions.groups.delete");
+      expect(requireRecord(deleteRequest.params)).toMatchObject({ name: "Projects" });
+      await expect
+        .poll(() =>
+          page
+            .locator('[data-session-section^="category:"]')
+            .evaluateAll((elements) =>
+              elements.map((element) => element.getAttribute("data-session-section")),
+            ),
+        )
+        .toEqual(["category:Apps"]);
+      await expect
+        .poll(() =>
+          page.locator('[data-session-section="ungrouped"] .sidebar-recent-session').count(),
+        )
+        .toBe(3);
 
       // Group by "None" flattens the category sections into the plain list.
       const sortSessionsButton = page.getByRole("button", { name: "Sort sessions" });
@@ -619,6 +763,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
         "sessions.patch": {},
       },
       sessionKey: "agent:main:session-0",
+      sessionGroups: ["Alpha", "Beta"],
     });
 
     try {
@@ -628,10 +773,28 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await expect.poll(() => page.getByText("All sessions", { exact: true }).count()).toBe(0);
       await captureUiProof(page, "sidebar-all-sessions.png");
 
+      // New groups are created from a session's menu (Move to group → New group…),
+      // which files that session into the new group.
+      const sessionTen = page.locator(
+        '.sidebar-recent-session[data-session-key="agent:main:session-10"]',
+      );
+      await sessionTen.hover();
+      await sessionTen.getByRole("button", { name: "Open session menu" }).click();
+      // The submenu opens on pointerenter; clicking the host item would toggle
+      // the hover-opened submenu straight back closed.
+      await page.getByRole("menuitem", { name: "Move to group" }).hover();
       page.once("dialog", (dialog) => void dialog.accept("Gamma"));
-      await page.getByRole("button", { name: "New group…" }).click();
+      await page.getByRole("menuitem", { name: "New group…" }).click();
       const gamma = page.locator('[data-session-section="category:Gamma"]');
       await gamma.waitFor({ state: "visible" });
+      const createdPatch = await waitForPatch(
+        gateway,
+        (params) => params.key === "agent:main:session-10" && params.category === "Gamma",
+      );
+      expect(requireRecord(createdPatch.params)).toMatchObject({
+        category: "Gamma",
+        key: "agent:main:session-10",
+      });
 
       const sessionEleven = page.locator(
         '.sidebar-recent-session[data-session-key="agent:main:session-11"]',
@@ -647,11 +810,13 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       });
       await expect
         .poll(() => gamma.locator(".sidebar-recent-session").count(), { timeout: 10_000 })
-        .toBe(1);
+        .toBe(2);
       await captureUiProof(page, "sidebar-session-dropped-into-group.png");
 
       const ungrouped = page.locator('[data-session-section="ungrouped"]');
-      await gamma.locator(".sidebar-recent-session").dragTo(ungrouped);
+      await gamma
+        .locator('.sidebar-recent-session[data-session-key="agent:main:session-11"]')
+        .dragTo(ungrouped);
       const ungroupedPatch = await waitForPatch(
         gateway,
         (params) => params.key === "agent:main:session-11" && params.category === null,
@@ -662,7 +827,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       });
       await expect
         .poll(() => ungrouped.locator(".sidebar-recent-session").count(), { timeout: 10_000 })
-        .toBe(10);
+        .toBe(9);
 
       const alpha = page.locator('[data-session-section="category:Alpha"]');
       const alphaToggle = alpha.getByRole("button", { name: "Alpha", exact: true });
@@ -674,7 +839,8 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await alphaToggle.click();
       await expect.poll(() => alpha.locator(".sidebar-recent-session").count()).toBe(0);
 
-      await gamma.locator(".sidebar-session-group-drag-handle").dragTo(alpha, {
+      // Reorder by dragging the whole group header (not just the dot handle).
+      await gamma.locator(".sidebar-recent-sessions__head").dragTo(alpha, {
         targetPosition: { x: 4, y: 2 },
       });
       const customGroupOrder = () =>
@@ -722,22 +888,34 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       viewport: { height: 900, width: 1280 },
     });
     const page = await context.newPage();
-    await installMockGateway(page, {
+    const gateway = await installMockGateway(page, {
       methodResponses: {
         "sessions.list": sessionsListResponse([]),
       },
       sessionKey: "agent:main:main",
+      // Stored-but-empty catalog groups stay visible as sections/move targets.
+      sessionGroups: ["First group"],
     });
 
     try {
       await page.goto(`${server.baseUrl}chat`);
-      page.once("dialog", (dialog) => void dialog.accept("First group"));
-      await page.getByRole("button", { name: "New group…" }).click();
-      await page.locator('[data-session-section="category:First group"]').waitFor({
-        state: "visible",
-      });
+      const firstGroup = page.locator('[data-session-section="category:First group"]');
+      await firstGroup.waitFor({ state: "visible" });
       await page.locator('[data-session-section="ungrouped"] .sidebar-recent-session').waitFor({
         state: "visible",
+      });
+
+      // A header-menu-created group starts empty and still gets a section.
+      await firstGroup.locator(".sidebar-recent-sessions__head").hover();
+      await firstGroup.getByRole("button", { name: "Group options for First group" }).click();
+      page.once("dialog", (dialog) => void dialog.accept("Second group"));
+      await page.getByRole("menuitem", { name: "New group…" }).click();
+      await page.locator('[data-session-section="category:Second group"]').waitFor({
+        state: "visible",
+      });
+      const putRequest = await gateway.waitForRequest("sessions.groups.put");
+      expect(requireRecord(putRequest.params)).toMatchObject({
+        names: ["First group", "Second group"],
       });
     } finally {
       await context.close();
