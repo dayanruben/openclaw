@@ -85,6 +85,7 @@ export const SessionFileEntrySchema = Type.Object(
     size: Type.Optional(Type.Integer({ minimum: 0 })),
     updatedAtMs: Type.Optional(Type.Integer({ minimum: 0 })),
     content: Type.Optional(Type.String()),
+    hash: Type.Optional(NonEmptyString),
   },
   { additionalProperties: false },
 );
@@ -152,6 +153,81 @@ export const SessionsFilesGetResultSchema = Type.Object(
     sessionKey: NonEmptyString,
     root: Type.Optional(NonEmptyString),
     file: SessionFileEntrySchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Overwrites one existing session workspace file with hash-based CAS. */
+export const SessionsFilesSetParamsSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    path: NonEmptyString,
+    agentId: Type.Optional(NonEmptyString),
+    content: Type.String(),
+    expectedHash: NonEmptyString,
+  },
+  { additionalProperties: false },
+);
+
+/** Result for overwriting one session workspace file. */
+export const SessionsFilesSetResultSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    root: Type.Optional(NonEmptyString),
+    file: SessionFileEntrySchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Change status for one file in a session checkout diff. */
+export const SessionDiffFileStatusSchema = Type.Union([
+  Type.Literal("added"),
+  Type.Literal("modified"),
+  Type.Literal("deleted"),
+  Type.Literal("renamed"),
+]);
+
+/** One changed file in a session checkout diff. */
+export const SessionDiffFileSchema = Type.Object(
+  {
+    path: NonEmptyString,
+    oldPath: Type.Optional(NonEmptyString),
+    status: SessionDiffFileStatusSchema,
+    additions: Type.Integer({ minimum: 0 }),
+    deletions: Type.Integer({ minimum: 0 }),
+    binary: Type.Optional(Type.Boolean()),
+    untracked: Type.Optional(Type.Boolean()),
+    /** Per-file unified patch text; absent for binary or oversized files. */
+    patch: Type.Optional(Type.String()),
+    truncated: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Reads the git diff of a session checkout against its base branch. */
+export const SessionsDiffParamsSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    agentId: Type.Optional(NonEmptyString),
+  },
+  { additionalProperties: false },
+);
+
+/** Branch + working-tree diff for one session checkout. */
+export const SessionsDiffResultSchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    root: Type.Optional(NonEmptyString),
+    branch: Type.Optional(NonEmptyString),
+    /** Display label of the diff base: the default branch name or "HEAD". */
+    baseRef: Type.Optional(NonEmptyString),
+    files: Type.Array(SessionDiffFileSchema),
+    additions: Type.Integer({ minimum: 0 }),
+    deletions: Type.Integer({ minimum: 0 }),
+    truncated: Type.Optional(Type.Boolean()),
+    unavailableReason: Type.Optional(
+      Type.Union([Type.Literal("unknown_session"), Type.Literal("not_git")]),
+    ),
   },
   { additionalProperties: false },
 );
