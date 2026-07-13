@@ -702,6 +702,21 @@ export type CronStatus = {
   nextWakeAtMs?: number | null;
 };
 
+export type CronRunResult =
+  | { ok: true; ran: true }
+  | { ok: true; enqueued: true; runId: string }
+  | {
+      ok: true;
+      ran: false;
+      reason:
+        | "not-due"
+        | "already-running"
+        | "restart-recovery-pending"
+        | "invalid-spec"
+        | "stopped";
+    }
+  | { ok: false };
+
 export type CronRunLogEntry = {
   ts: number;
   jobId: string;
@@ -848,6 +863,7 @@ export type ModelCatalogEntry = {
   contextWindow?: number;
   reasoning?: boolean;
   input?: Array<"text" | "image" | "document">;
+  apiKeySupported?: boolean;
 };
 
 export type ToolCatalogProfile =
@@ -861,5 +877,9 @@ export type ToolsEffectiveResult =
 
 export type ModelAuthStatusProvider =
   import("../../../src/gateway/server-methods/models-auth-status.js").ModelAuthStatusProvider;
+export type ModelAuthStatusProfile =
+  import("../../../src/gateway/server-methods/models-auth-status.js").ModelAuthStatusProfile;
 export type ModelAuthStatusResult =
   import("../../../src/gateway/server-methods/models-auth-status.js").ModelAuthStatusResult;
+export type ModelsProbeResult =
+  import("../../../packages/gateway-protocol/src/schema.js").ModelsProbeResult;
