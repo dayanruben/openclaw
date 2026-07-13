@@ -1,33 +1,10 @@
+import type { Static } from "typebox";
 // Gateway Protocol schema module defines durable cross-surface approval shapes.
 import { Type } from "typebox";
-import type { Static } from "typebox";
+import { APPROVAL_ID_WELL_FORMED_UNICODE_PATTERN } from "./approval-id.js";
 import { NonEmptyString } from "./primitives.js";
 
-const APPROVAL_ID_WELL_FORMED_UNICODE_PATTERN =
-  "^(?!\\.{1,2}$)(?:[^\\uD800-\\uDFFF]|[\\uD800-\\uDBFF][\\uDC00-\\uDFFF])+$";
-
-/** Whether an approval id is non-empty, path-stable, and contains no unpaired UTF-16 surrogate. */
-export function isWellFormedApprovalId(value: string): boolean {
-  if (value.length === 0 || value === "." || value === "..") {
-    return false;
-  }
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      if (index + 1 >= value.length) {
-        return false;
-      }
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) {
-        return false;
-      }
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return false;
-    }
-  }
-  return true;
-}
+export { isWellFormedApprovalId } from "./approval-id.js";
 
 const ApprovalIdSchema = Type.String({
   minLength: 1,
@@ -60,6 +37,26 @@ export const ApprovalTerminalReasonSchema = Type.Union([
   Type.Literal("run-aborted"),
   Type.Literal("gateway-restart"),
   Type.Literal("storage-corrupt"),
+]);
+
+/** Terminal reason accepted for an allowed approval. */
+export const ApprovalAllowedReasonSchema = Type.Union([Type.Literal("user")]);
+
+/** Terminal reasons accepted for a denied approval. */
+export const ApprovalDeniedReasonSchema = Type.Union([
+  Type.Literal("user"),
+  Type.Literal("malformed-verdict"),
+  Type.Literal("no-route"),
+  Type.Literal("storage-corrupt"),
+]);
+
+/** Terminal reason accepted for an expired approval. */
+export const ApprovalExpiredReasonSchema = Type.Union([Type.Literal("timeout")]);
+
+/** Terminal reasons accepted for a cancelled approval. */
+export const ApprovalCancelledReasonSchema = Type.Union([
+  Type.Literal("run-aborted"),
+  Type.Literal("gateway-restart"),
 ]);
 
 /** Reviewer-facing severity for plugin-owned approval requests. */
@@ -128,7 +125,6 @@ const ApprovalRecordCommonFields = {
 
 const ApprovalResolutionFields = {
   resolvedAtMs: Type.Integer({ minimum: 0 }),
-  reason: ApprovalTerminalReasonSchema,
 };
 
 /** Approval that has not yet accepted a reviewer decision. */
@@ -144,6 +140,7 @@ export const AllowedApprovalSnapshotSchema = Type.Object(
     ...ApprovalResolutionFields,
     status: Type.Literal("allowed"),
     decision: ApprovalAllowDecisionSchema,
+    reason: ApprovalAllowedReasonSchema,
   },
   { additionalProperties: false },
 );
@@ -155,6 +152,7 @@ export const DeniedApprovalSnapshotSchema = Type.Object(
     ...ApprovalResolutionFields,
     status: Type.Literal("denied"),
     decision: Type.Literal("deny"),
+    reason: ApprovalDeniedReasonSchema,
   },
   { additionalProperties: false },
 );
@@ -165,6 +163,7 @@ export const ExpiredApprovalSnapshotSchema = Type.Object(
     ...ApprovalRecordCommonFields,
     ...ApprovalResolutionFields,
     status: Type.Literal("expired"),
+    reason: ApprovalExpiredReasonSchema,
   },
   { additionalProperties: false },
 );
@@ -175,6 +174,7 @@ export const CancelledApprovalSnapshotSchema = Type.Object(
     ...ApprovalRecordCommonFields,
     ...ApprovalResolutionFields,
     status: Type.Literal("cancelled"),
+    reason: ApprovalCancelledReasonSchema,
   },
   { additionalProperties: false },
 );
@@ -227,8 +227,51 @@ export const ApprovalResolveResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
-// These types are plugin-SDK-reachable through approval presentation. Export
-// them from the owner module so public declarations do not retain ProtocolSchemas.
+const SessionApprovalEventCommonFields = {
+  sessionKey: NonEmptyString,
+  sourceSessionKey: Type.Optional(NonEmptyString),
+  updatedAtMs: Type.Integer({ minimum: 0 }),
+};
+
+/** Sanitized pending transition delivered only to an opted-in session audience. */
+export const PendingSessionApprovalEventSchema = Type.Object(
+  {
+    ...SessionApprovalEventCommonFields,
+    phase: Type.Literal("pending"),
+    approval: PendingApprovalSnapshotSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Sanitized terminal transition delivered only to an opted-in session audience. */
+export const TerminalSessionApprovalEventSchema = Type.Object(
+  {
+    ...SessionApprovalEventCommonFields,
+    phase: Type.Literal("terminal"),
+    approval: TerminalApprovalSnapshotSchema,
+  },
+  { additionalProperties: false },
+);
+
+/** Sanitized approval transition delivered only to an opted-in session audience. */
+export const SessionApprovalEventSchema = Type.Union([
+  PendingSessionApprovalEventSchema,
+  TerminalSessionApprovalEventSchema,
+]);
+
+/** Authoritative pending approval set returned when a session stream subscribes. */
+export const SessionApprovalReplaySchema = Type.Object(
+  {
+    sessionKey: NonEmptyString,
+    updatedAtMs: Type.Integer({ minimum: 0 }),
+    approvals: Type.Array(PendingApprovalSnapshotSchema),
+    truncated: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+
+// Owner-local wire types derived directly from local schema consts so the
+// public plugin-sdk declaration graph never pulls in the ProtocolSchemas registry.
 export type ApprovalKind = Static<typeof ApprovalKindSchema>;
 export type ApprovalDecision = Static<typeof ApprovalDecisionSchema>;
 export type ApprovalAllowDecision = Static<typeof ApprovalAllowDecisionSchema>;
@@ -238,13 +281,15 @@ export type ExecApprovalPresentation = Static<typeof ExecApprovalPresentationSch
 export type PluginApprovalPresentation = Static<typeof PluginApprovalPresentationSchema>;
 export type ApprovalPresentation = Static<typeof ApprovalPresentationSchema>;
 export type PendingApprovalSnapshot = Static<typeof PendingApprovalSnapshotSchema>;
-export type AllowedApprovalSnapshot = Static<typeof AllowedApprovalSnapshotSchema>;
-export type DeniedApprovalSnapshot = Static<typeof DeniedApprovalSnapshotSchema>;
-export type ExpiredApprovalSnapshot = Static<typeof ExpiredApprovalSnapshotSchema>;
-export type CancelledApprovalSnapshot = Static<typeof CancelledApprovalSnapshotSchema>;
 export type ApprovalSnapshot = Static<typeof ApprovalSnapshotSchema>;
-export type TerminalApprovalSnapshot = Static<typeof TerminalApprovalSnapshotSchema>;
 export type ApprovalGetParams = Static<typeof ApprovalGetParamsSchema>;
 export type ApprovalGetResult = Static<typeof ApprovalGetResultSchema>;
 export type ApprovalResolveParams = Static<typeof ApprovalResolveParamsSchema>;
 export type ApprovalResolveResult = Static<typeof ApprovalResolveResultSchema>;
+export type AllowedApprovalSnapshot = Static<typeof AllowedApprovalSnapshotSchema>;
+export type DeniedApprovalSnapshot = Static<typeof DeniedApprovalSnapshotSchema>;
+export type ExpiredApprovalSnapshot = Static<typeof ExpiredApprovalSnapshotSchema>;
+export type CancelledApprovalSnapshot = Static<typeof CancelledApprovalSnapshotSchema>;
+export type TerminalApprovalSnapshot = Static<typeof TerminalApprovalSnapshotSchema>;
+export type SessionApprovalEvent = Static<typeof SessionApprovalEventSchema>;
+export type SessionApprovalReplay = Static<typeof SessionApprovalReplaySchema>;
