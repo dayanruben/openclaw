@@ -1,6 +1,7 @@
 // Matrix plugin module implements handler behavior.
 import {
   buildChannelInboundEventContext,
+  resolveInboundMentionDecision,
   toInboundMediaFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { hasFinalInboundReplyDispatch } from "openclaw/plugin-sdk/channel-inbound";
@@ -12,6 +13,7 @@ import {
   type MessageReceipt,
 } from "openclaw/plugin-sdk/channel-outbound";
 import {
+  type AgentPlanStep,
   buildChannelProgressDraftLineForEntry,
   createChannelProgressDraftGate,
   type ChannelProgressDraftLine,
@@ -211,7 +213,7 @@ type MatrixMonitorHandlerParams = {
   startupMs: number;
   startupGraceMs: number;
   dropPreStartupMessages: boolean;
-  inboundDeduper?: Pick<MatrixInboundEventDeduper, "claimEvent" | "commitEvent" | "releaseEvent">;
+  inboundDeduper?: Pick<MatrixInboundEventDeduper, "claim">;
   directTracker: {
     isDirectMessage: (params: {
       roomId: string;
@@ -576,7 +578,9 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
 
   return async (roomId: string, event: MatrixRawEvent) => {
     const eventId = typeof event.event_id === "string" ? event.event_id.trim() : "";
-    let claimedInboundEvent = false;
+    let inboundReplayClaim:
+      | import("openclaw/plugin-sdk/persistent-dedupe").ChannelReplayClaimHandle
+      | undefined;
     let draftStreamRef: MatrixDraftStreamHandle | undefined;
     let draftConsumed = false;
     try {
@@ -613,11 +617,11 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
       const eventTs = event.origin_server_ts;
       const eventAge = event.unsigned?.age;
       const commitInboundEventIfClaimed = async () => {
-        if (!claimedInboundEvent || !inboundDeduper || !eventId) {
+        if (!inboundReplayClaim) {
           return;
         }
-        await inboundDeduper.commitEvent({ roomId, eventId });
-        claimedInboundEvent = false;
+        await inboundReplayClaim.commit();
+        inboundReplayClaim = undefined;
       };
       const readIngressPrefix = async () => {
         const selfUserId = await client.getUserId();
@@ -663,8 +667,11 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           return undefined;
         }
         if (eventId && inboundDeduper) {
-          claimedInboundEvent = await inboundDeduper.claimEvent({ roomId, eventId });
-          if (!claimedInboundEvent) {
+          const claim = await inboundDeduper.claim({ roomId, eventId });
+          // Missing identifiers fail open; committed and in-flight events do not.
+          if (claim.kind === "claimed") {
+            inboundReplayClaim = claim.handle;
+          } else if (claim.kind !== "invalid") {
             logVerboseMessage(`matrix: skip duplicate inbound event room=${roomId} id=${eventId}`);
             return undefined;
           }
@@ -1150,16 +1157,25 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
                 ? roomConfig?.requireMention
                 : true
           : false;
-        const shouldBypassMention =
-          allowTextCommands &&
-          isRoom &&
-          shouldRequireMention &&
-          !wasMentioned &&
-          !hasExplicitMention &&
-          commandAuthorized &&
-          hasControlCommandInMessage;
+        const mentionDecision = resolveInboundMentionDecision({
+          facts: {
+            // Matrix native mention metadata lets us reliably decide absence even
+            // when no custom mention regex is configured.
+            canDetectMention: true,
+            wasMentioned,
+            hasAnyMention: hasExplicitMention,
+          },
+          policy: {
+            isGroup: isRoom,
+            requireMention: shouldRequireMention,
+            allowTextCommands,
+            hasControlCommand: hasControlCommandInMessage,
+            commandAuthorized,
+          },
+        });
+        const { effectiveWasMentioned, shouldBypassMention } = mentionDecision;
         const canDetectMention = agentMentionRegexes.length > 0 || hasExplicitMention;
-        if (isRoom && shouldRequireMention && !wasMentioned && !shouldBypassMention) {
+        if (mentionDecision.shouldSkip) {
           const pendingHistoryBody = preflightAudioTranscript
             ? formatMatrixAudioTranscript(preflightAudioTranscript)
             : pendingHistoryText || pendingHistoryPollText;
@@ -1362,6 +1378,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           isRoom,
           shouldRequireMention,
           wasMentioned,
+          effectiveWasMentioned,
           shouldBypassMention,
           canDetectMention,
           commandAuthorized,
@@ -1432,6 +1449,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         isRoom,
         shouldRequireMention,
         wasMentioned,
+        effectiveWasMentioned,
         shouldBypassMention,
         canDetectMention,
         commandAuthorized,
@@ -1674,7 +1692,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
             isMentionableGroup: isRoom,
             requireMention: shouldRequireMention,
             canDetectMention,
-            effectiveWasMentioned: wasMentioned || shouldBypassMention,
+            effectiveWasMentioned,
             shouldBypassMention,
           }),
         );
@@ -1779,13 +1797,15 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
       let currentDraftReplyToId = draftReplyToId;
       let previewToolProgressSuppressed = false;
       let previewToolProgressLines: Array<string | ChannelProgressDraftLine> = [];
+      let latestPlan: AgentPlanStep[] | undefined;
+      let latestPlanExplanation: string | undefined;
       const progressConfigEntry = params.accountConfig ?? cfg.channels?.matrix;
       const progressSeed = `${_route.accountId}:${roomId}`;
       // Set after the first final payload consumes or discards the draft event
       // so subsequent finals go through normal delivery.
 
       const renderProgressDraft = () => {
-        if (!draftStream || !progressDraftStreaming) {
+        if (!draftStream) {
           return;
         }
         const previewText = formatChannelProgressDraftText({
@@ -1794,6 +1814,8 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           seed: progressSeed,
           formatLine: formatMatrixToolProgressMarkdownCode,
           bullet: "-",
+          narration: latestPlanExplanation,
+          plan: latestPlan,
         });
         if (!previewText) {
           return;
@@ -1837,6 +1859,8 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
               seed: progressSeed,
               formatLine: formatMatrixToolProgressMarkdownCode,
               bullet: "-",
+              narration: latestPlanExplanation,
+              plan: latestPlan,
             }),
           );
           return;
@@ -1857,17 +1881,41 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
         }
       };
 
+      const pushPlanProgress = async (steps?: AgentPlanStep[], explanation?: string) => {
+        latestPlan = steps?.length ? steps.map((entry) => ({ ...entry })) : undefined;
+        latestPlanExplanation = explanation?.replace(/\s+/g, " ").trim() || undefined;
+        if (!draftStream || previewToolProgressSuppressed) {
+          return;
+        }
+        if (!progressDraftStreaming) {
+          renderProgressDraft();
+          return;
+        }
+        const alreadyStarted = progressDraftGate.hasStarted;
+        await progressDraftGate.startNow();
+        if (alreadyStarted && progressDraftGate.hasStarted) {
+          // An empty-render clear keeps the prior draft visible on purpose:
+          // deleting mid-turn drops the edit anchor, and zero-step snapshots
+          // only arrive from label:false configs with retracting producers.
+          renderProgressDraft();
+        }
+      };
+
       const suppressPreviewToolProgressForAnswerText = (text: string | undefined) => {
         if (!text?.trim()) {
           return;
         }
         previewToolProgressSuppressed = true;
         previewToolProgressLines = [];
+        latestPlan = undefined;
+        latestPlanExplanation = undefined;
       };
 
       const resetPreviewToolProgress = () => {
         previewToolProgressSuppressed = false;
         previewToolProgressLines = [];
+        latestPlan = undefined;
+        latestPlanExplanation = undefined;
       };
 
       const buildPreviewToolProgressReplyOptions = (): Partial<GetReplyOptions> => {
@@ -1921,15 +1969,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
             if (payload.phase !== "update") {
               return;
             }
-            await pushPreviewToolProgress(
-              formatChannelProgressDraftLine({
-                event: "plan",
-                phase: payload.phase,
-                title: payload.title,
-                explanation: payload.explanation,
-                steps: payload.steps,
-              }),
-            );
+            await pushPlanProgress(payload.planSteps, payload.explanation);
           },
           onApprovalEvent: async (payload) => {
             if (payload.phase !== "requested") {
@@ -2567,9 +2607,7 @@ export function createMatrixRoomMessageHandler(params: MatrixMonitorHandlerParam
           await redactMatrixDraftEvent(client, roomId, draftEventId);
         }
       }
-      if (claimedInboundEvent && inboundDeduper && eventId) {
-        inboundDeduper.releaseEvent({ roomId, eventId });
-      }
+      inboundReplayClaim?.release();
     }
   };
 }
