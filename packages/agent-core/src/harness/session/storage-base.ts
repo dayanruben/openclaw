@@ -34,7 +34,7 @@ function isSideAppendEntry(entry: SessionTreeEntry): boolean {
 
 function generateEntryId(byId: { has(id: string): boolean }): string {
   for (let i = 0; i < 100; i++) {
-    const id = uuidv7().slice(0, 8);
+    const id = uuidv7().slice(-8);
     if (!byId.has(id)) {
       return id;
     }
@@ -252,7 +252,7 @@ export abstract class BaseSessionStorage<
       }
       seen.add(current.id);
       if (current.type !== "leaf") {
-        path.unshift(current);
+        path.push(current);
       }
       // Leaf rows are control records. Descendants written by older appenders
       // may point at the marker, but their visible ancestry starts at its target.
@@ -271,6 +271,7 @@ export abstract class BaseSessionStorage<
       }
       current = parent;
     }
+    path.reverse();
     return path;
   }
 

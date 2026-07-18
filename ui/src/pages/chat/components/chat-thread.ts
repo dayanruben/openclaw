@@ -15,7 +15,7 @@ import { repeat } from "lit/directives/repeat.js";
 import { styleMap } from "lit/directives/style-map.js";
 import { classifySessionKind } from "../../../../../src/sessions/classify-session-kind.js";
 import type { SessionsListResult } from "../../../api/types.ts";
-import { beginNativeWindowDragFromTopInset } from "../../../app/native-window-drag.ts";
+import type { QuestionPrompt } from "../../../app/question-prompt.ts";
 import { resolveLocalUserName } from "../../../app/user-identity.ts";
 import { icons } from "../../../components/icons.ts";
 import "../../../components/tooltip.ts";
@@ -110,6 +110,7 @@ type ChatThreadProps = {
   /** True while the agent is visibly working (isChatRunWorking); shows the working spark. */
   runWorking?: boolean;
   planStatus?: PlanStatus | null;
+  questionPrompts?: readonly QuestionPrompt[];
   sessions: SessionsListResult | null;
   /** Host context resolving global-alias session keys (scope=global fleets). */
   /** Includes assistantAgentId so bare-global welcome recents scope to the selected agent. */
@@ -133,6 +134,8 @@ type ChatThreadProps = {
   onOpenSessionCheckpoints?: () => void | Promise<void>;
   onAssistantAttachmentLoaded?: () => void;
   onRequestUpdate?: () => void;
+  onQuestionChange?: () => void;
+  onQuestionSubmit?: (id: string, answers: Record<string, string[]>) => void | Promise<void>;
   onChatScroll?: (event: Event) => void;
   onHistoryIntent?: (event: Event) => void;
   onDraftChange: (next: string) => void;
@@ -976,12 +979,16 @@ function renderChatThreadContents(
     runWorking: Boolean(props.runWorking),
     runActive: Boolean(props.runActive),
     planStatus: props.planStatus,
+    questionPrompts: props.questionPrompts,
     loading: props.loading,
     searchOpen: state.searchOpen,
     searchQuery: state.searchQuery,
   });
   syncToolCardExpansionState(props.sessionKey, chatItems, Boolean(props.autoExpandToolCalls));
   const expandedToolCards = getExpandedToolCards(props.sessionKey);
+  const questionPrompts = new Map(
+    (props.questionPrompts ?? []).map((prompt) => [prompt.id, prompt]),
+  );
   const toggleToolCardExpanded = (toolCardId: string) => {
     expandedToolCards.set(toolCardId, !expandedToolCards.get(toolCardId));
     requestUpdate();
@@ -1054,6 +1061,9 @@ function renderChatThreadContents(
     }
     if (item.kind === "stream-run") {
       return renderStreamGroup(item.parts, {
+        questionPrompts,
+        onQuestionChange: props.onQuestionChange,
+        onQuestionSubmit: props.onQuestionSubmit,
         planStatus: props.planStatus,
         planActive: Boolean(props.runActive),
         onOpenSidebar: props.onOpenSidebar,
@@ -1077,6 +1087,13 @@ function renderChatThreadContents(
     }
     if (item.kind === "group") {
       return renderGroupItem(item);
+    }
+    if (item.kind === "question") {
+      return renderStreamGroup([item], {
+        questionPrompts,
+        onQuestionChange: props.onQuestionChange,
+        onQuestionSubmit: props.onQuestionSubmit,
+      });
     }
     return nothing;
   });
@@ -1124,6 +1141,7 @@ function renderChatThreadContents(
     Boolean(props.runActive),
     Boolean(props.runWorking),
     props.planStatus,
+    props.questionPrompts,
     Boolean(props.autoExpandToolCalls),
     props.assistantName,
     assistantIdentity.avatar,
@@ -1180,7 +1198,6 @@ function renderChatThreadContents(
         : null}
       @touchend=${props.onHistoryIntent}
       @touchcancel=${props.onHistoryIntent}
-      @mousedown=${beginNativeWindowDragFromTopInset}
       @click=${(event: Event) => {
         handleMarkdownCodeBlockCopy(event);
         const target = markdownFileLinkFromEvent(event);
