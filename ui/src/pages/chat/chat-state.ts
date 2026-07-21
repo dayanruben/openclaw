@@ -19,6 +19,7 @@ import {
   type UiSettings,
 } from "../../app/settings.ts";
 import { fireFirstReplyConfetti } from "../../components/confetti.ts";
+import { isGitHubPullRequestLink } from "../../components/github-link-hovercard.ts";
 import { isRenderableControlUiAvatarUrl } from "../../lib/avatar.ts";
 import type { ChatAttachment, ChatQueueItem } from "../../lib/chat/chat-types.ts";
 import { extractText } from "../../lib/chat/message-extract.ts";
@@ -61,7 +62,6 @@ import {
   type ChatState,
 } from "./chat-history.ts";
 import {
-  clearPendingQueueItemsForRun,
   readDeliveredQueuedChatSendForRun,
   removeDeliveredQueuedChatSendForRun,
   removeQueuedMessage,
@@ -111,7 +111,7 @@ import {
   storedChatOutboxScopeKey,
   type StoredChatOutboxScope,
 } from "./composer-persistence.ts";
-import { admitInitialTurnHandoff } from "./initial-turn-handoff.ts";
+import { admitInitialTurnHandoff, admitInitialUserMessageHandoff } from "./initial-turn-handoff.ts";
 import {
   handleChatDraftChange,
   handleChatInputHistoryKey,
@@ -120,7 +120,6 @@ import {
   type ChatInputHistoryKeyResult,
 } from "./input-history.ts";
 import { applyModelCatalogResult, loadModels } from "./models.ts";
-import { preserveQueuedUserTurn, preserveSteeredQueueItemsForRun } from "./queued-user-turn.ts";
 import type { AfterCommitEffect, RenderLifecycle } from "./render-lifecycle.ts";
 import {
   handleAbortChat,
@@ -142,6 +141,8 @@ import {
   type ChatMessageCache,
   type ChatSessionSnapshot,
 } from "./session-message-cache.ts";
+import { preserveQueuedUserTurn, retireSteeredChipsForTerminalRun } from "./steer-lifecycle.ts";
+import { isAckedSteeredChip } from "./steered-chip.ts";
 import {
   clearAuthoritativeTerminal,
   rememberAuthoritativeTerminal,
@@ -182,6 +183,7 @@ export type ChatPageHost = ChatHost &
   SessionWorkspaceHost &
   BackgroundTasksHost & {
     sessions: SessionCapability;
+    initialUserMessage: ApplicationContext["initialUserMessage"];
     settings: UiSettings;
     password: string;
     onboarding: boolean;
@@ -296,6 +298,7 @@ export type ChatPageHost = ChatHost &
     exportCurrentChat?: () => Promise<void> | void;
     refreshCurrentSessionTools?: () => Promise<void>;
     refreshCurrentChat?: () => Promise<void>;
+    refreshSessionPullRequests?: (options?: { refresh?: boolean }) => Promise<void>;
   };
 
 type PendingCreatedSessionComposer = {
@@ -550,6 +553,7 @@ export function resetChatStateForRouteSession(
   // switchPaneSession requests an update only after adopting the new baseline.
   syncVisibleChatQueueProjection(state, { requestUpdate: false });
   const initialTurn = admitInitialTurnHandoff(state, sessionKey);
+  admitInitialUserMessageHandoff(state.initialUserMessage, state, sessionKey);
   const { fallback } = resolveChatComposerMemoryFallback(state, sessionKey);
   if (fallback) {
     state.chatMessage = fallback.message;
@@ -1065,8 +1069,7 @@ function finishSessionMessageRunReconcile(
   if (!cleared) {
     return false;
   }
-  preserveSteeredQueueItemsForRun(state, runId ?? undefined);
-  clearPendingQueueItemsForRun(state, runId ?? undefined);
+  retireSteeredChipsForTerminalRun(state, runId ?? undefined);
   void loadChatHistory(state)
     .finally(() => {
       if (!areUiSessionKeysEquivalent(state.sessionKey, sessionKey)) {
@@ -1223,6 +1226,7 @@ export function createPageState(
   const appConfig = context.config.current;
   const state = {
     sessions: context.sessions,
+    initialUserMessage: context.initialUserMessage,
     settings,
     password: "",
     onboarding: false,
@@ -1428,6 +1432,40 @@ export function createPageState(
   return state;
 }
 
+const GITHUB_URL_CANDIDATE = /https:\/\/github\.com\/[^\s<>()\]}'"`]+/giu;
+
+function terminalOwnsActiveChatStream(
+  state: ChatPageHost,
+  payload: ChatEventPayload | undefined,
+): boolean {
+  return typeof payload?.runId === "string" && payload.runId === state.chatRunId;
+}
+
+function finalAssistantReplyHasPullRequestLink(
+  state: ChatPageHost,
+  payload: ChatEventPayload | undefined,
+): boolean {
+  if (payload?.state !== "final") {
+    return false;
+  }
+  const texts = [extractText(payload.message)];
+  if (terminalOwnsActiveChatStream(state, payload)) {
+    texts.push(
+      state.chatStream,
+      ...(state.chatStreamSegments ?? []).map((segment) => segment.text),
+    );
+  }
+  return texts.some((text) => {
+    if (typeof text !== "string") {
+      return false;
+    }
+    return Array.from(text.matchAll(GITHUB_URL_CANDIDATE)).some((match) => {
+      const href = match[0].replace(/[.,;:!?]+$/u, "");
+      return isGitHubPullRequestLink(href);
+    });
+  });
+}
+
 function hasVisibleFinalAssistantReply(
   state: ChatPageHost,
   payload: ChatEventPayload | undefined,
@@ -1450,6 +1488,9 @@ function hasVisibleFinalAssistantReply(
   ) {
     return true;
   }
+  if (!terminalOwnsActiveChatStream(state, payload)) {
+    return false;
+  }
   return [
     state.chatStream,
     ...(state.chatStreamSegments ?? []).map((segment) => segment.text),
@@ -1463,6 +1504,8 @@ export function handlePageGatewayEvent(state: ChatPageHost, event: GatewayEventF
   if (event.event === "chat") {
     const payload = event.payload as ChatEventPayload | undefined;
     const shouldCelebrateFirstReply = hasVisibleFinalAssistantReply(state, payload);
+    const shouldRefreshPullRequests =
+      shouldCelebrateFirstReply && finalAssistantReplyHasPullRequestLink(state, payload);
     const terminal =
       payload?.state === "final" || payload?.state === "aborted" || payload?.state === "error";
     const delivered = terminal ? rememberDeliveredQueuedUserTurn(state, payload?.runId) : null;
@@ -1474,6 +1517,9 @@ export function handlePageGatewayEvent(state: ChatPageHost, event: GatewayEventF
     const result = handleChatGatewayEvent(state as unknown as ChatState, payload);
     if (shouldCelebrateFirstReply && result === "final") {
       fireFirstReplyConfetti();
+    }
+    if (shouldRefreshPullRequests) {
+      void state.refreshSessionPullRequests?.({ refresh: true });
     }
     replayPendingSessionMessageReload(state, payload);
     if (terminal) {
@@ -1540,10 +1586,7 @@ function rememberDeliveredQueuedUserTurn(
     deliveredQueueTurnsByClient.set(owner, turns);
   }
   const pending = state.chatQueue.find(
-    // sendState marks an in-flight steer whose chat.send is unacknowledged;
-    // materializing it would leave a phantom turn if the Gateway rejects it.
-    (item) =>
-      item.kind === "steered" && item.pendingRunId === runId && item.sendRunId && !item.sendState,
+    (item) => isAckedSteeredChip(item) && item.pendingRunId === runId,
   );
   const stored = readDeliveredQueuedChatSendForRun(state, runId)?.item;
   if (stored) {
@@ -1559,7 +1602,7 @@ function rememberDeliveredQueuedUserTurn(
   }
   // Original-turn copies first: a run can own both its queued turn (stored, or
   // its remembered fallback in `turns`) and a steered follow-up chip; the chip
-  // is preserved separately by preserveSteeredQueueItemsForRun and must not
+  // is preserved separately by retireSteeredChipsForTerminalRun and must not
   // mask the original copy here.
   return stored ?? turns.get(runId) ?? pending ?? null;
 }
