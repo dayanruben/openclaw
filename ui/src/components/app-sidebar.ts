@@ -1,5 +1,6 @@
 import { html, nothing, type PropertyValues } from "lit";
 import { state } from "lit/decorators.js";
+import type { GatewayControlUiPluginTab } from "../api/gateway.ts";
 import {
   serializeSidebarEntry,
   type NavigationRouteId,
@@ -26,9 +27,15 @@ import { sessionHasBoard } from "../lib/board/provider.ts";
 import { isGatewayMethodAdvertised } from "../lib/gateway-methods.ts";
 import { searchForSession } from "../lib/sessions/index.ts";
 import { areUiSessionKeysEquivalent, normalizeAgentId } from "../lib/sessions/session-key.ts";
-import { shouldHandleNavigationClick } from "./app-sidebar-nav-menus.ts";
+import { pluginTabKey } from "../pages/plugin/route.ts";
+import {
+  renderSidebarPluginTab,
+  shouldHandleNavigationClick,
+  sidebarPluginTabs,
+} from "./app-sidebar-nav-menus.ts";
 import { AppSidebarSessionListElement } from "./app-sidebar-session-list.ts";
 import type { SidebarRecentSession } from "./app-sidebar-session-types.ts";
+import type { SidebarWorkboardBoard } from "./app-sidebar-workboard.ts";
 import { icons } from "./icons.ts";
 import {
   LOBSTER_LOGO_VISIT_EVENT,
@@ -139,6 +146,10 @@ class AppSidebar extends AppSidebarSessionListElement {
     if (changed.has("connected")) {
       this.syncOfflineIndicator();
     }
+  }
+
+  protected override firstUpdated() {
+    requestAnimationFrame(() => requestAnimationFrame(() => this.classList.add("sidebar-r")));
   }
 
   private syncOfflineIndicator(schedule = !this.connected) {
@@ -409,8 +420,12 @@ class AppSidebar extends AppSidebarSessionListElement {
   private renderSidebarZoneEntry(
     entry: SidebarZoneEntry,
     sessionRows: ReadonlyMap<string, SidebarRecentSession>,
+    workboardRows: ReadonlyMap<string, SidebarWorkboardBoard>,
   ) {
-    if (entry.type === "route" && !this.isRouteEnabled(entry.route)) {
+    if (
+      (entry.type === "route" && !this.isRouteEnabled(entry.route)) ||
+      (entry.type === "workboard" && !this.isRouteEnabled("workboard"))
+    ) {
       return nothing;
     }
     const serialized = serializeSidebarEntry(entry);
@@ -419,26 +434,60 @@ class AppSidebar extends AppSidebarSessionListElement {
     const content =
       entry.type === "route"
         ? this.renderRoute(entry.route)
-        : sessionRows.has(entry.key)
-          ? this.renderPinnedSidebarSession(sessionRows.get(entry.key)!)
-          : nothing;
+        : entry.type === "workboard"
+          ? workboardRows.has(entry.boardId)
+            ? this.renderWorkboardBoard(workboardRows.get(entry.boardId)!)
+            : nothing
+          : sessionRows.has(entry.key)
+            ? this.renderPinnedSidebarSession(sessionRows.get(entry.key)!)
+            : nothing;
+    const draggable = entry.type === "route" || entry.type === "workboard";
     return html`
       <div
         class="sidebar-zone-entry ${dropPosition
           ? `sidebar-zone-entry--drop-${dropPosition}`
           : ""} ${this.draggingSidebarEntry === serialized ? "sidebar-zone-entry--dragging" : ""}"
         data-sidebar-entry=${serialized}
-        draggable=${entry.type === "route" ? "true" : "false"}
+        draggable=${draggable ? "true" : "false"}
         @dragstart=${entry.type === "route"
           ? (event: DragEvent) => this.startSidebarRouteDrag(event, entry.route)
-          : nothing}
-        @dragend=${entry.type === "route" ? () => this.finishSidebarEntryDrag() : nothing}
+          : entry.type === "workboard"
+            ? (event: DragEvent) => this.startSidebarWorkboardDrag(event, entry.boardId)
+            : nothing}
+        @dragend=${draggable ? () => this.finishSidebarEntryDrag() : nothing}
         @dragover=${(event: DragEvent) => this.handleSidebarZoneDragOver(event, serialized)}
         @drop=${(event: DragEvent) => this.handleSidebarZoneDrop(event, serialized)}
       >
         ${content}
       </div>
     `;
+  }
+
+  private renderPluginTabEntry(tab: GatewayControlUiPluginTab) {
+    const ref = { pluginId: tab.pluginId, id: tab.id };
+    const key = pluginTabKey(ref);
+    return html`
+      <div class="sidebar-zone-entry" data-sidebar-entry=${`plugin:${key}`}>
+        ${renderSidebarPluginTab({
+          tab,
+          basePath: this.basePath,
+          active: this.activeRouteId === "plugin" && this.activePluginTabId === key,
+          onNavigate: (search) => this.onNavigate?.("plugin", { search }),
+        })}
+      </div>
+    `;
+  }
+
+  private renderWorkboardBoard(board: SidebarWorkboardBoard) {
+    const active = this.activeRouteId === "workboard" && this.activeWorkboardBoardId === board.id;
+    return (
+      this.workboardRenderers?.renderEntry({
+        board,
+        basePath: this.basePath,
+        active,
+        onNavigate: (pathname) => this.onNavigate?.("workboard", { pathname }),
+      }) ?? nothing
+    );
   }
 
   override render() {
@@ -462,7 +511,14 @@ class AppSidebar extends AppSidebarSessionListElement {
               >
                 ${this.renderHomeRow()}
                 ${sidebarZone.entries.map((entry) =>
-                  this.renderSidebarZoneEntry(entry, sidebarZone.sessionRows),
+                  this.renderSidebarZoneEntry(
+                    entry,
+                    sidebarZone.sessionRows,
+                    sidebarZone.workboardRows,
+                  ),
+                )}
+                ${sidebarPluginTabs(this.context?.gateway.snapshot.hello?.controlUiTabs).map(
+                  (tab) => this.renderPluginTabEntry(tab),
                 )}
               </div>
             </nav>
