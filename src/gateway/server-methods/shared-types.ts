@@ -1,4 +1,5 @@
 import type {
+  SessionCreatorIdentity,
   SessionApprovalReplay,
   SystemAgentChatQuestion,
 } from "../../../packages/gateway-protocol/src/index.js";
@@ -49,6 +50,7 @@ import type {
 } from "../server-instance-runtime.types.js";
 import type { DedupeEntry } from "../server-shared.js";
 import type { GatewayEventLoopHealth } from "../server/event-loop-health.js";
+import type { SessionObserverService } from "../session-observer-contract.js";
 import type { TerminalLaunchResolution } from "../terminal/launch.js";
 import type { TerminalSessionManager } from "../terminal/session-manager.js";
 import type { WorkerSessionPlacementReader } from "../worker-environments/placement-projector.js";
@@ -76,10 +78,16 @@ export type GatewayClient = {
     hasAvatar: boolean;
     updatedAt: number;
   };
+  /** Trusted operator identity resolved once during connection admission. */
+  operatorIdentity?: SessionCreatorIdentity;
   pluginSurfaceUrls?: Record<string, string>;
   pluginNodeCapabilitySurfaces?: Record<string, PluginNodeCapabilitySurface>;
   pluginNodeCapabilities?: Record<string, { capability: string; expiresAtMs: number }>;
   isDeviceTokenAuth?: boolean;
+  /** Temporary legacy migration session closed when normal enforcement resumes. */
+  isControlUiDeviceAuthMigrationSession?: boolean;
+  /** Signed shared-auth session admitted only to approve its own upgrade pairing. */
+  isControlUiDeviceAuthMigration?: boolean;
   internal?: {
     allowModelOverride?: boolean;
     approvalRuntime?: boolean;
@@ -149,6 +157,7 @@ export type GatewayRequestContext = {
   cron: GatewayCronServiceContract;
   cronStorePath: string;
   getRuntimeConfig: () => OpenClawConfig;
+  sessionObserver?: SessionObserverService;
   notifyPluginMetadataChanged: () => void;
   getMcpAppSandboxPort?: () => number | undefined;
   ensureSandboxHostPort?: () => Promise<number>;
@@ -221,6 +230,13 @@ export type GatewayRequestContext = {
   hasConnectedClientsForDevice?: (deviceId: string) => boolean;
   disconnectClientsUsingSharedGatewayAuth?: () => void;
   enforceSharedGatewayAuthGenerationForConfigWrite?: (nextConfig: OpenClawConfig) => void;
+  claimControlUiDeviceAuthMigration?: (deviceId: string) => boolean;
+  releaseControlUiDeviceAuthMigrationClaim?: (deviceId: string) => void;
+  completeControlUiDeviceAuthMigration?: (device: {
+    deviceId: string;
+    publicKey: string;
+    scopes: string[];
+  }) => void;
   nodeRegistry: NodeRegistry;
   /** Durable cloud-worker lifecycle; absent from lightweight in-process contexts. */
   workerEnvironmentService?: WorkerEnvironmentServiceContract;

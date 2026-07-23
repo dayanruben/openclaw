@@ -139,21 +139,37 @@ describe("config footprint guardrails", () => {
     }
   });
 
-  it("keeps canonical nested streaming paths in the public core channel schema", () => {
+  it("keeps canonical nested streaming paths in channel-owned schemas", () => {
     const source = readSource("src/config/zod-schema.providers-core.ts");
+    const discordSource = readSource("extensions/discord/src/config-schema.ts");
+    const msTeamsSource = readSource("extensions/msteams/src/config-schema.ts");
+    const slackSource = readSource("extensions/slack/src/config-schema.ts");
 
-    expect(source).toContain("streaming: ChannelPreviewStreamingConfigSchema.optional(),");
-    expect(source).toContain("streaming: SlackStreamingConfigSchema.optional(),");
-    expect(source).not.toContain('streamMode: z.enum(["replace", "status_final", "append"])');
-    expect(source).not.toContain("draftChunk:");
-    expect(source).not.toContain("nativeStreaming:");
+    expect(source).toContain("streaming: TelegramPreviewStreamingConfigSchema.optional(),");
+    expect(discordSource).toContain("streaming: DiscordPreviewStreamingConfigSchema.optional(),");
+    expect(msTeamsSource).toContain("streaming: ChannelPreviewStreamingConfigSchema.optional(),");
+    expect(slackSource).toContain("streaming: SlackStreamingConfigSchema.optional(),");
+    for (const schemaSource of [source, discordSource, msTeamsSource, slackSource]) {
+      expect(schemaSource).not.toContain(
+        'streamMode: z.enum(["replace", "status_final", "append"])',
+      );
+      expect(schemaSource).not.toContain("draftChunk:");
+      expect(schemaSource).not.toContain("nativeStreaming:");
+    }
   });
 
-  it("keeps shared setup input canonical-first", () => {
+  it("keeps Matrix setup input canonical-first after plugin ownership", () => {
+    const source = readSource("extensions/matrix/src/setup-config.ts");
+    const canonicalIndex = source.indexOf("dangerouslyAllowPrivateNetwork?: boolean;");
+    const aliasIndex = source.indexOf("allowPrivateNetwork?: boolean;");
+
+    expect(canonicalIndex).toBeGreaterThanOrEqual(0);
+    expect(aliasIndex).toBeGreaterThan(canonicalIndex);
+  });
+
+  it("keeps retired config aliases out of the shared setup input", () => {
     const source = readSource("src/channels/plugins/types.core.ts");
 
-    expect(source).toContain("dangerouslyAllowPrivateNetwork?: boolean;");
-    expect(source).toContain("allowPrivateNetwork?: boolean;");
     expect(source).not.toContain("streamMode?:");
     expect(source).not.toContain("groupMentionsOnly?:");
     expect(source).not.toContain("perSession?:");
@@ -194,12 +210,8 @@ describe("config footprint guardrails", () => {
       .toSorted((left, right) => left.localeCompare(right));
 
     expect(exportedSchemaNames).toEqual([
-      "DiscordConfigSchema",
       "GoogleChatConfigSchema",
       "IMessageConfigSchema",
-      "MSTeamsConfigSchema",
-      "SignalConfigSchema",
-      "SlackConfigSchema",
       "TelegramConfigSchema",
       "WhatsAppConfigSchema",
     ]);

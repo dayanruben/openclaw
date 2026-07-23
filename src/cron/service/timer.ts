@@ -1,7 +1,7 @@
 /** Cron timer loop, execution, catch-up, and run-result state transitions. */
 import pMap, { pMapSkip } from "p-map";
 import { resolveCronTriggerMinIntervalMs } from "../../config/cron-limits.js";
-import { loadSessionEntry } from "../../config/sessions/session-accessor.js";
+import { loadSessionEntryReadOnly } from "../../config/sessions/session-accessor.js";
 import type { CronConfig } from "../../config/types.cron.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type { HeartbeatRunResult } from "../../infra/heartbeat-wake.js";
@@ -491,7 +491,7 @@ function resolveMainSessionCronDeliveryContext(
     return undefined;
   }
   try {
-    const sessionEntry = loadSessionEntry({
+    const sessionEntry = loadSessionEntryReadOnly({
       agentId,
       sessionKey: targetSessionKey,
       storePath,
@@ -702,7 +702,7 @@ function resolveDeliveryState(params: {
   runStatus: CronRunStatus;
   delivered?: boolean;
   error?: string;
-  globalFailureDestination?: CronConfig["failureDestination"];
+  globalFailureDestination?: CronConfig["failureAlert"];
 }): {
   delivered?: boolean;
   status: CronDeliveryStatus;
@@ -826,7 +826,7 @@ export function applyJobResult(
     // so `lastDeliveryError` is populated without conflating it with a
     // run-level failure. Error runs fall back to the run error as before.
     error: result.deliveryError ?? result.error,
-    globalFailureDestination: state.deps.cronConfig?.failureDestination,
+    globalFailureDestination: state.deps.cronConfig?.failureAlert,
   });
   job.state.lastDelivered = deliveryState.delivered;
   job.state.lastDeliveryStatus = deliveryState.status;
@@ -2599,6 +2599,19 @@ async function executeJobCore(
       ...effectiveJob,
       payload: appendCronPayloadText(effectiveJob.payload, options.streamBatch),
     };
+  }
+  if (effectiveJob.payload.kind === "heartbeat") {
+    // The monitor only pokes the wake queue: coalescing, busy-retry, and the
+    // quiet-hours guard all live in the heartbeat runner, exactly as they did
+    // for the dedicated interval timer this job replaces.
+    state.deps.requestHeartbeat({
+      source: "interval",
+      intent: "scheduled",
+      reason: "interval",
+      agentId: effectiveJob.agentId,
+    });
+    const result = { status: "ok" as const, summary: "heartbeat wake requested" };
+    return triggerEval ? { ...result, triggerEval } : result;
   }
   if (effectiveJob.sessionTarget === "main") {
     const result = await executeMainSessionCronJob(
