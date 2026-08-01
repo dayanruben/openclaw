@@ -1,6 +1,7 @@
 import type { SessionsListResult } from "../api/types.ts";
 import type { RouteId } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context.ts";
+import { appendSessionResults } from "../lib/sessions/reconcile.ts";
 import { normalizeAgentId } from "../lib/sessions/session-key.ts";
 import {
   SIDEBAR_AGENT_SESSION_LIST_LIMIT,
@@ -24,15 +25,27 @@ type SidebarSessionPaginationOwner = {
 export type SidebarSessionPaginationState = {
   listRequestToken: symbol | null;
   pageRequestToken: symbol | null;
+  loadedScope?: {
+    agentId: string;
+    archivedFilter: SidebarSessionStatusFilter;
+    generation: number;
+  };
 };
 
 function publishSidebarSessionResult(
   owner: SidebarSessionPaginationOwner,
   agentId: string,
   result: SessionsListResult | null,
+  archivedFilter: SidebarSessionStatusFilter,
+  generation: number,
 ) {
   owner.sessionsResult = result;
   owner.sessionsAgentId = agentId;
+  owner.sidebarSessionPaginationState.loadedScope = {
+    agentId: normalizeAgentId(agentId),
+    archivedFilter,
+    generation,
+  };
   if (result) {
     owner.sessionRowsByAgent[normalizeAgentId(agentId)] = result.sessions;
     for (const row of result.sessions) {
@@ -42,34 +55,6 @@ function publishSidebarSessionResult(
     }
   }
   owner.requestSessionDataUpdate();
-}
-
-function appendSidebarSessionResults(
-  previous: SessionsListResult,
-  page: SessionsListResult,
-): SessionsListResult {
-  const seen = new Set<string>();
-  const sessions = [...previous.sessions, ...page.sessions].filter((row) => {
-    if (!row.key || seen.has(row.key)) {
-      return false;
-    }
-    seen.add(row.key);
-    return true;
-  });
-  const totalCount = page.totalCount ?? previous.totalCount;
-  const hasMore =
-    page.hasMore ??
-    (typeof totalCount === "number" && Number.isFinite(totalCount)
-      ? sessions.length < totalCount
-      : false);
-  return {
-    ...page,
-    count: sessions.length,
-    totalCount,
-    hasMore,
-    nextOffset: page.nextOffset ?? (hasMore ? sessions.length : null),
-    sessions,
-  };
 }
 
 export async function refreshSidebarSessions(
@@ -84,10 +69,19 @@ export async function refreshSidebarSessions(
   const state = owner.sidebarSessionPaginationState;
   state.pageRequestToken = null;
   const archivedFilter = statusFilter();
+  const loadedScope = state.loadedScope;
+  const preservesVisibleScope =
+    archivedFilter !== "active" &&
+    loadedScope?.generation === owner.sessionScopeGeneration &&
+    loadedScope.archivedFilter === archivedFilter &&
+    loadedScope.agentId === normalizeAgentId(agentId) &&
+    normalizeAgentId(owner.sessionsAgentId ?? "") === loadedScope.agentId;
   const options = {
     agentId,
     archivedFilter,
-    limit: SIDEBAR_AGENT_SESSION_LIST_LIMIT,
+    limit: preservesVisibleScope
+      ? Math.max(SIDEBAR_AGENT_SESSION_LIST_LIMIT, owner.sessionsResult?.sessions.length ?? 0)
+      : SIDEBAR_AGENT_SESSION_LIST_LIMIT,
     includeGlobal: true,
     includeUnknown: true,
     configuredAgentsOnly: true,
@@ -120,7 +114,7 @@ export async function refreshSidebarSessions(
   try {
     const result = await context.sessions.list(options);
     if (isCurrent()) {
-      publishSidebarSessionResult(owner, agentId, result);
+      publishSidebarSessionResult(owner, agentId, result, archivedFilter, generation);
     }
   } catch (error) {
     if (isCurrent()) {
@@ -204,7 +198,13 @@ export async function loadMoreSidebarSessions(
 
     const page = await context.sessions.list(options);
     if (page && isCurrent()) {
-      publishSidebarSessionResult(owner, agentId, appendSidebarSessionResults(previous, page));
+      publishSidebarSessionResult(
+        owner,
+        agentId,
+        appendSessionResults(previous, page),
+        archivedFilter,
+        generation,
+      );
     }
   } catch (error) {
     if (isCurrent()) {
