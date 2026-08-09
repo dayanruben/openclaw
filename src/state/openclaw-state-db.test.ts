@@ -15,6 +15,7 @@ import {
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { listOpenFileDescriptorsForPath } from "../infra/open-file-descriptors.test-support.js";
 import { readSqliteNumberPragma } from "../infra/sqlite-pragma.test-support.js";
+import { assertSqliteSchemaContains } from "../infra/sqlite-schema-contract.js";
 import { loadTaskRegistryStateFromSqlite } from "../tasks/task-registry.store.sqlite.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { VERSION } from "../version.js";
@@ -39,6 +40,7 @@ import {
   withOpenClawStateStartupMigrationCheckpointDatabase,
 } from "./openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
+import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
 import {
   collectSqliteSchemaShape,
   createSqliteSchemaShapeFromSql,
@@ -66,6 +68,19 @@ function createInitialStateSchemaShape() {
     delete shape[tableName];
   }
   return shape;
+}
+
+function createOlderV6StateSchemaWithoutWorkerSshFallbackPorts(): string {
+  const startMarker = "CREATE TABLE IF NOT EXISTS worker_environment_ssh_fallback_ports (";
+  const start = OPENCLAW_STATE_SCHEMA_SQL.indexOf(startMarker);
+  const endMarker = "\n) STRICT;";
+  const end = start >= 0 ? OPENCLAW_STATE_SCHEMA_SQL.indexOf(endMarker, start) : -1;
+  if (start < 0 || end < 0) {
+    throw new Error("worker SSH fallback port schema block is missing");
+  }
+  return `${OPENCLAW_STATE_SCHEMA_SQL.slice(0, start)}${OPENCLAW_STATE_SCHEMA_SQL.slice(
+    end + endMarker.length,
+  )}`;
 }
 
 function expectStateSchemaMigrationRequired(
@@ -1118,6 +1133,27 @@ describe("openclaw state database", () => {
         .prepare("UPDATE schema_meta SET schema_version = ? WHERE meta_key = 'primary'")
         .run("not-an-integer"),
     ).toThrow();
+  });
+
+  it("keeps the additive worker SSH fallback table compatible with older v6 containment", () => {
+    const database = openMaterializedCurrentStateDatabase();
+    try {
+      expect(
+        database
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?")
+          .get("worker_environment_ssh_fallback_ports"),
+      ).toEqual({ name: "worker_environment_ssh_fallback_ports" });
+      expect(() =>
+        assertSqliteSchemaContains(
+          database,
+          "older v6 state database",
+          createOlderV6StateSchemaWithoutWorkerSshFallbackPorts(),
+          { allowedMissingTables: FIRST_USE_STATE_TABLES },
+        ),
+      ).not.toThrow();
+    } finally {
+      database.close();
+    }
   });
 
   it("skips exclusive repair when the automatic schema gate is already current", () => {
@@ -3030,6 +3066,41 @@ INSERT INTO macos_port_guardian_records VALUES (4242, 18789, '/usr/bin/ssh', 're
     expect(
       reopened.db.prepare("SELECT installed_at_ms, updated_at_ms FROM claw_package_refs").get(),
     ).toEqual({ installed_at_ms: 1234, updated_at_ms: 1234 });
+  });
+
+  it("adds optional Claw application provenance columns to existing state databases", () => {
+    const stateDir = createTempStateDir();
+    const database = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: stateDir } });
+    const databasePath = database.path;
+    closeOpenClawStateDatabaseForTest();
+
+    const { DatabaseSync } = requireNodeSqlite();
+    const legacyDb = new DatabaseSync(databasePath);
+    legacyDb.exec(`
+      ALTER TABLE claw_package_refs DROP COLUMN extension_id;
+      ALTER TABLE claw_package_refs DROP COLUMN extension_format;
+      ALTER TABLE claw_package_refs DROP COLUMN extension_detected_format;
+      ALTER TABLE claw_package_refs DROP COLUMN extension_mapped_json;
+      ALTER TABLE claw_package_refs DROP COLUMN extension_unavailable_json;
+      ALTER TABLE claw_package_refs DROP COLUMN extension_adapter_identity;
+    `);
+    markStateDatabaseAsV5(legacyDb);
+    legacyDb.close();
+
+    const reopened = openOpenClawStateDatabase({ env: { OPENCLAW_STATE_DIR: stateDir } });
+    const packageColumns = reopened.db
+      .prepare("PRAGMA table_info(claw_package_refs)")
+      .all() as Array<{ name?: string }>;
+    expect(packageColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "extension_id",
+        "extension_format",
+        "extension_detected_format",
+        "extension_mapped_json",
+        "extension_unavailable_json",
+        "extension_adapter_identity",
+      ]),
+    );
   });
 
   it("adds worker bootstrap lifecycle columns to existing state databases", () => {
