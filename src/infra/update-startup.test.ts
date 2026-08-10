@@ -28,6 +28,7 @@ const {
   refreshRemoteModelCatalogMock,
   scheduleGatewaySigusr1RestartMock,
   startManagedServiceUpdateHandoffMock,
+  versionMock,
 } = vi.hoisted(() => ({
   detectRespawnSupervisorMock: vi.fn(),
   getRuntimeConfigMock: vi.fn(() => ({})),
@@ -48,6 +49,7 @@ const {
     command: "openclaw update --yes --channel beta --timeout 2700",
     logPath: "/tmp/openclaw-handoff.log",
   })),
+  versionMock: { value: "1.0.0" },
 }));
 
 vi.mock("../config/config.js", () => ({
@@ -111,7 +113,9 @@ vi.mock("./update-check.js", async () => {
 });
 
 vi.mock("../version.js", () => ({
-  VERSION: "1.0.0",
+  get VERSION() {
+    return versionMock.value;
+  },
 }));
 
 vi.mock("../process/exec.js", () => ({
@@ -229,6 +233,7 @@ describe("update-startup", () => {
   }
 
   beforeEach(async () => {
+    versionMock.value = "1.0.0";
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-17T10:00:00Z"));
     testState = await createOpenClawTestState({
@@ -304,10 +309,10 @@ describe("update-startup", () => {
     mockNpmChannelTag(tag, version);
   }
 
-  function mockPackageInstallStatus() {
-    vi.mocked(resolveOpenClawPackageRoot).mockResolvedValue("/opt/openclaw");
+  function mockPackageInstallStatus(root = "/opt/openclaw") {
+    vi.mocked(resolveOpenClawPackageRoot).mockResolvedValue(root);
     vi.mocked(checkUpdateStatus).mockResolvedValue({
-      root: "/opt/openclaw",
+      root,
       installKind: "package",
       packageManager: "npm",
     } satisfies UpdateCheckResult);
@@ -779,6 +784,49 @@ describe("update-startup", () => {
     await expectPathMissing(path.join(tempDir, "update-check.json"));
   });
 
+  it("uses the extended-stable selector for an installed final extended-stable package", async () => {
+    versionMock.value = "2026.6.33";
+    mockPackageUpdateStatus("extended-stable", "2026.7.33");
+    const onUpdateAvailableChange = vi.fn();
+
+    await runGatewayUpdateCheck({
+      cfg: {},
+      log: { info: vi.fn() },
+      isNixMode: false,
+      allowInTests: true,
+      onUpdateAvailableChange,
+    });
+
+    expect(resolveNpmChannelTag).toHaveBeenCalledWith({
+      channel: "extended-stable",
+      timeoutMs: 2500,
+    });
+    expect(onUpdateAvailableChange).toHaveBeenCalledWith({
+      currentVersion: "2026.6.33",
+      latestVersion: "2026.7.33",
+      channel: "extended-stable",
+    });
+  });
+
+  it("does not query extended-stable when configless startup hints are disabled", async () => {
+    versionMock.value = "2026.6.33";
+    mockPackageInstallStatus();
+    const runAutoUpdate = createAutoUpdateSuccessMock();
+
+    await runGatewayUpdateCheck({
+      cfg: { update: { checkOnStart: false, auto: { enabled: true } } },
+      log: { info: vi.fn() },
+      isNixMode: false,
+      allowInTests: true,
+      runAutoUpdate,
+    });
+
+    expect(checkUpdateStatus).toHaveBeenCalledOnce();
+    expect(resolveNpmChannelTag).not.toHaveBeenCalled();
+    expect(runAutoUpdate).not.toHaveBeenCalled();
+    expect(readPersistedUpdateCheckState()).toBeNull();
+  });
+
   it("discovers and deduplicates an exact extended-stable update without auto-applying", async () => {
     const onUpdateAvailableChange = vi.fn();
     const runAutoUpdate = createAutoUpdateSuccessMock();
@@ -972,6 +1020,24 @@ describe("update-startup", () => {
     expectStableAutoRolloutStatePreserved();
   });
 
+  it("uses the verified package install kind for a configless extended-stable release", async () => {
+    versionMock.value = "2026.6.33";
+    mockPackageInstallStatus();
+    mockNpmChannelTag("extended-stable", "2026.6.34");
+
+    await runGatewayUpdateCheck({
+      cfg: {},
+      log: { info: vi.fn() },
+      isNixMode: false,
+      allowInTests: true,
+    });
+
+    expect(resolveNpmChannelTag).toHaveBeenCalledWith({
+      channel: "extended-stable",
+      timeoutMs: 2500,
+    });
+  });
+
   it("skips all extended-stable work in Nix mode", async () => {
     const runAutoUpdate = createAutoUpdateSuccessMock();
 
@@ -1154,6 +1220,7 @@ describe("update-startup", () => {
         ts: installedAtMs,
         stats: {
           mode: "git",
+          root: "/opt/openclaw",
           after: { sha: "current-sha", version: "1.0.0" },
         },
       });
@@ -1172,6 +1239,35 @@ describe("update-startup", () => {
       currentSha: "current-sha",
       commitAtMs,
       installedAtMs,
+    });
+  });
+
+  it("does not inherit install time from a same-SHA receipt for another checkout", async () => {
+    const installedAtMs = Date.now() - 60 * 60 * 1000;
+    runOpenClawStateWriteTransaction(({ db }) => {
+      writeUpdateInstallReceiptRowSync(db, {
+        kind: "update",
+        status: "ok",
+        ts: installedAtMs,
+        stats: {
+          mode: "git",
+          root: "/opt/other-openclaw",
+          after: { sha: "current-sha", version: "1.0.0" },
+        },
+      });
+    });
+    mockDevGitStatus({ behind: 0 });
+
+    await runGatewayUpdateCheck({
+      cfg: { update: { channel: "dev" } },
+      log: { info: vi.fn() },
+      isNixMode: false,
+      allowInTests: true,
+    });
+
+    expect(getUpdateSchedule()?.install?.git).toEqual({
+      status: "current",
+      currentSha: "current-sha",
     });
   });
 
@@ -1507,7 +1603,11 @@ describe("update-startup", () => {
   });
 
   it("hands supervised auto-updates to a detached service handoff before restarting", async () => {
-    mockPackageInstallStatus();
+    const installRoot = path.join(tempDir, "pnpm-store-target");
+    const installOwner = path.join(tempDir, "pnpm-linked-owner");
+    await fs.mkdir(installRoot);
+    await fs.symlink(installRoot, installOwner, "dir");
+    mockPackageInstallStatus(installOwner);
     mockNpmChannelTag("beta", "2.0.0-beta.1");
     detectRespawnSupervisorMock.mockReturnValue("launchd");
     startManagedServiceUpdateHandoffMock.mockResolvedValueOnce({
@@ -1530,7 +1630,7 @@ describe("update-startup", () => {
     expect(runCommandWithTimeout).not.toHaveBeenCalled();
     expect(startManagedServiceUpdateHandoffMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        root: "/opt/openclaw",
+        root: installOwner,
         timeoutMs: 45 * 60 * 1000,
         restartDrainTimeoutMs: 300_000,
         channel: "beta",
