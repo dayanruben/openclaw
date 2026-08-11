@@ -51,6 +51,7 @@ import {
   createRunRetryBudget,
   isRunRetryBudgetExhausted,
   recordRunRetry,
+  type RunRetryBudget,
 } from "./run/retry-budget.js";
 import { handleRetryLimitExhaustion } from "./run/retry-limit.js";
 import { prepareEmbeddedRunRuntime } from "./run/runtime-preparation.js";
@@ -115,7 +116,6 @@ export async function runPreparedEmbeddedLoop(
     profileFailureStore,
     pluginHarnessOwnsAuthBootstrap,
     attemptedThinking,
-    advanceAttemptAuthProfile,
     maybeRefreshRuntimeAuthForAuthError,
     stopRuntimeAuthRefreshTimer,
     getApiKeyInfo,
@@ -183,7 +183,7 @@ export async function runPreparedEmbeddedLoop(
   const maxEmptyResponseRetryAttempts = DEFAULT_EMPTY_RESPONSE_RETRY_LIMIT;
 
   const MAX_RUN_RETRY_ATTEMPTS = resolveMaxRunRetryIterations(profileCandidates.length);
-  const runRetryBudget = createRunRetryBudget(MAX_RUN_RETRY_ATTEMPTS);
+  const runRetryBudget: RunRetryBudget = createRunRetryBudget(MAX_RUN_RETRY_ATTEMPTS);
   const contextRecoveryState = createEmbeddedRunContextRecoveryState();
   let bootstrapPromptWarningSignaturesSeen =
     params.bootstrapPromptWarningSignaturesSeen ??
@@ -266,6 +266,7 @@ export async function runPreparedEmbeddedLoop(
     harnessOwnsTransport: () => preparedRuntime.snapshot().pluginHarnessOwnsTransport,
     getRuntimeAuthOwnerId: () => preparedRuntime.snapshot().agentHarness.id,
     getApiKeyInfo,
+    advanceAuthProfile: preparedRuntime.advanceAttemptAuthProfile,
   });
   const ownsContextEngineLogicalTurnLease = params.contextEngineLogicalTurnLease === undefined;
   const contextEngineLogicalTurnLease =
@@ -294,6 +295,8 @@ export async function runPreparedEmbeddedLoop(
     admission: params.userTurnTranscriptRecorder?.getAdmissionReceipt(),
     isHeartbeat: isHeartbeatLifecycleRunKind(params.bootstrapContextRunKind),
     lease: contextEngineLogicalTurnLease,
+    recorder: params.userTurnTranscriptRecorder,
+    sessionTarget: params.sessionTarget,
   });
   const contextEngine = contextEngineLogicalTurnLease.begin().engine;
   const resolveContextEnginePluginId = () =>
@@ -489,17 +492,14 @@ export async function runPreparedEmbeddedLoop(
         emptyErrorRetries,
         overloadProfileRotations,
         overloadProfileRotationLimit: failoverRetryController.overloadProfileRotationLimit,
-        rateLimitProfileRotations: failoverRetryController.rateLimitProfileRotations,
-        rateLimitProfileRotationLimit: failoverRetryController.rateLimitProfileRotationLimit,
         sameModelIdleTimeoutRetries,
         previousRetryFailoverReason: lastRetryFailoverReason,
         maybeMarkAuthProfileFailure: failoverRetryController.maybeMarkAuthProfileFailure,
-        maybeEscalateRateLimitProfileFallback:
-          failoverRetryController.maybeEscalateRateLimitProfileFallback,
         maybeRetrySameModelRateLimit: failoverRetryController.maybeRetrySameModelRateLimit,
         maybeBackoffBeforeOverloadFailover:
           failoverRetryController.maybeBackoffBeforeOverloadFailover,
-        advanceAttemptAuthProfile,
+        advanceAuthProfile: failoverRetryController.advanceAuthProfile,
+        advanceRateLimitAuthProfile: failoverRetryController.advanceRateLimitAuthProfile,
         traceAttempts,
         suspendForFailure,
         suspensionSessionId: sessionPromptState.sessionId ?? params.sessionId,
@@ -559,10 +559,13 @@ export async function runPreparedEmbeddedLoop(
         terminalState: resolvedTerminalState,
         attemptCompactionCount: terminalAttemptCompactionCount,
         prepared: terminalPrepared,
-        finalizationAttempted: settledTurnFinalizationAttempted,
+        finalizationOutcome: settledTurnFinalizationOutcome,
       } = finalizedTerminal;
       lastRunPromptUsage = finalizedTerminal.lastRunPromptUsage;
-      if (finalizedTerminal.finalizationSucceeded) {
+      if (
+        settledTurnFinalizationOutcome === "answered" ||
+        settledTurnFinalizationOutcome === "completed-empty"
+      ) {
         assistantProfileFailureReason = null;
       }
 
@@ -651,7 +654,7 @@ export async function runPreparedEmbeddedLoop(
         attemptAuthProfileStore,
         apiKeyInfo: getApiKeyInfo(),
         agentHarnessId: agentHarness.id,
-        settledTurnFinalizationAttempted,
+        settledTurnFinalizationOutcome,
         pluginHarnessOwnsTransport,
         pluginHarnessOwnsAuthBootstrap,
         reportedModelRef,
