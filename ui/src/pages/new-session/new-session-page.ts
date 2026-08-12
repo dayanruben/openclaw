@@ -4,13 +4,19 @@ import { html, nothing } from "lit";
 import { property, state } from "lit/decorators.js";
 import type {
   FsListDirResult,
+  ProjectRecord,
+  ProjectRecent,
+  ProjectsListResult,
+  ProjectsRegisterResult,
   SessionsCatalogStartTerminalResult,
+  UsersPrefsGetResult,
+  UsersPrefsSetResult,
   WorktreesBranchesResult,
 } from "../../../../packages/gateway-protocol/src/index.js";
 import { selectApplicationSession } from "../../app/agent-selection.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
 import { beginNativeWindowDragFromTopInset } from "../../app/native-window-drag.ts";
-import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
+import { hasOperatorAdminAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { loadSettings } from "../../app/settings.ts";
 import "../../components/tooltip.ts";
 import "../../components/web-awesome-popover.ts";
@@ -75,8 +81,13 @@ import { NewSessionModelControl } from "./model-control.ts";
 import { isAbsolutePath, isKnownWorkspacePath } from "./path.ts";
 import { renderPlaceSelect } from "./place-picker.ts";
 import {
+  decodeIdentityPreferences,
+  encodeIdentityPreferences,
+  loadBrowserPreferences,
   loadNewSessionPreference,
   patchNewSessionPreference,
+  PREFS_MIGRATION_KEY,
+  replaceBrowserPreference,
   type NewSessionPreference,
 } from "./preferences.ts";
 import { retainRejectedInitialTurn } from "./rejected-initial-turn.ts";
@@ -92,6 +103,9 @@ class NewSessionPage extends OpenClawLightDomElement {
 
   @state() private agentId = "";
   @state() private folder = "";
+  @state() private projects: ProjectRecord[] = [];
+  @state() private projectRecents: ProjectRecent[] | undefined;
+  @state() private projectId = "";
   @state() private worktree = false;
   @state() private visibility: NewSessionVisibility = "normal";
   @state() private worktreeName = "";
@@ -112,6 +126,8 @@ class NewSessionPage extends OpenClawLightDomElement {
   @state() private browserError: string | null = null;
   @state() private browserListing: FsListDirResult | null = null;
   @state() private browserTarget: BrowserTarget | null = null;
+  @state() private browserProjectPath: string | null = null;
+  @state() private browserRegistering = false;
   @state() private placePopoverOpen = false;
   @state() private placePopoverHiding = false;
   // Live head input; absolute paths stay applicable even without fs.listDir.
@@ -159,6 +175,11 @@ class NewSessionPage extends OpenClawLightDomElement {
   private catalogRetryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private cloudProfileRetryAttempt = 0;
   private cloudProfileRetryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  private preferenceScope = "";
+  private preferenceMode: "local" | "loading" | "remote" = "local";
+  private identityPreferences: Record<string, NewSessionPreference> = {};
+  private preferenceLoad: Promise<void> = Promise.resolve();
+  private preferenceWrite: Promise<void> = Promise.resolve();
 
   // Re-render when agents/sessions hydrate so the hero identity and the
   // recent-chats list appear without a route change.
@@ -194,6 +215,37 @@ class NewSessionPage extends OpenClawLightDomElement {
       discoverGatewayName(client, advertised, signal),
     onComplete: (name) => {
       this.gatewayName = name;
+    },
+  });
+
+  private readonly projectsTask = new Task(this, {
+    args: () =>
+      [
+        this.isConnected && this.gatewayConnected ? this.gatewayClient : null,
+        this.context
+          ? isGatewayMethodAdvertised(this.context.gateway.snapshot, "projects.list") === true
+          : false,
+        this.gatewayConnectionEpoch,
+      ] as const,
+    task: async ([client, advertised]) => {
+      if (!client || !advertised) {
+        return { projects: [] } as ProjectsListResult;
+      }
+      return await client.request<ProjectsListResult>("projects.list", {});
+    },
+    onComplete: (result) => {
+      const projects = result.projects ?? [];
+      this.projects = projects;
+      this.projectRecents = result.recents;
+      if (this.projectId && !projects.some((project) => project.id === this.projectId)) {
+        this.projectId = "";
+        this.maybeLoadBranches();
+      }
+    },
+    onError: () => {
+      this.projects = [];
+      this.projectRecents = undefined;
+      this.projectId = "";
     },
   });
 
@@ -234,8 +286,8 @@ class NewSessionPage extends OpenClawLightDomElement {
     if (selectionUnavailable) {
       this.error = t("newSession.catalogUnavailable");
     } else if (recovery.unsupported) {
-      this.error = t("newSession.cloudSecureContextRequired");
-    } else if (this.error === t("newSession.cloudSecureContextRequired")) {
+      this.error = t("newSession.cloudRecoveryUnavailable");
+    } else if (this.error === t("newSession.cloudRecoveryUnavailable")) {
       this.error = null;
     }
   }
@@ -325,6 +377,99 @@ class NewSessionPage extends OpenClawLightDomElement {
         this.retryPendingCatalogTarget();
       }
     }
+    this.synchronizeIdentityPreferences(snapshot.selfUser?.id);
+  }
+
+  private synchronizeIdentityPreferences(profileId: string | undefined) {
+    const client = this.gatewayConnected ? this.gatewayClient : null;
+    const advertised =
+      this.context &&
+      isGatewayMethodAdvertised(this.context.gateway.snapshot, "users.prefs.get") === true &&
+      isGatewayMethodAdvertised(this.context.gateway.snapshot, "users.prefs.set") === true;
+    const scope =
+      client && profileId && advertised ? `${this.gatewayConnectionEpoch}\0${profileId}` : "local";
+    if (scope === this.preferenceScope) {
+      return;
+    }
+    this.preferenceScope = scope;
+    this.identityPreferences = {};
+    if (!client || !profileId || !advertised) {
+      this.preferenceMode = "local";
+      this.preferenceLoad = Promise.resolve();
+      return;
+    }
+    this.preferenceMode = "loading";
+    this.preferenceLoad = this.loadIdentityPreferences({
+      client,
+      gatewayUrl: this.gatewayUrl,
+      scope,
+    });
+  }
+
+  private async loadIdentityPreferences(params: {
+    client: NonNullable<ApplicationContext["gateway"]["snapshot"]["client"]>;
+    gatewayUrl: string;
+    scope: string;
+  }): Promise<void> {
+    try {
+      const result = await params.client.request<UsersPrefsGetResult>("users.prefs.get", {});
+      if (this.preferenceScope !== params.scope) {
+        return;
+      }
+      if (result.status !== "ok") {
+        this.preferenceMode = "local";
+        return;
+      }
+      let preferences = decodeIdentityPreferences(result.entries);
+      const browserPreferences = loadBrowserPreferences(params.gatewayUrl);
+      if (result.entries[PREFS_MIGRATION_KEY] !== true) {
+        const missingBrowserPreferences = Object.fromEntries(
+          Object.entries(browserPreferences).filter(
+            ([agentId]) => !Object.hasOwn(preferences, agentId),
+          ),
+        );
+        const migrationEntries = [
+          ...Object.entries(encodeIdentityPreferences(missingBrowserPreferences)),
+          [PREFS_MIGRATION_KEY, true] as const,
+        ];
+        let migrationFailed = false;
+        for (let offset = 0; offset < migrationEntries.length; offset += 32) {
+          const batch = Object.fromEntries(migrationEntries.slice(offset, offset + 32));
+          let response: UsersPrefsSetResult;
+          try {
+            response = await params.client.request<UsersPrefsSetResult>("users.prefs.set", {
+              entries: batch,
+            });
+          } catch {
+            migrationFailed = true;
+            break;
+          }
+          if (this.preferenceScope !== params.scope) {
+            return;
+          }
+          if (response.status !== "ok") {
+            migrationFailed = true;
+            break;
+          }
+          Object.assign(preferences, decodeIdentityPreferences(batch));
+        }
+        if (migrationFailed) {
+          preferences = { ...browserPreferences, ...preferences };
+        }
+      }
+      this.identityPreferences = preferences;
+      this.preferenceMode = "remote";
+      for (const [agentId, preference] of Object.entries(preferences)) {
+        replaceBrowserPreference(params.gatewayUrl, agentId, preference);
+      }
+      if (this.agentsHydrated) {
+        this.adoptAgentDefaults({ preserveSelectedAgent: true, preserveSelectedFolder: true });
+      }
+    } catch {
+      if (this.preferenceScope === params.scope) {
+        this.preferenceMode = "local";
+      }
+    }
   }
 
   private invalidateGatewayDiscovery(
@@ -361,6 +506,9 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.agentId = "";
     this.agentSelectedByUser = false;
     this.folder = "";
+    this.projects = [];
+    this.projectRecents = undefined;
+    this.projectId = "";
     this.folderSelectedByUser = false;
     this.preferredWorktreeRestore = false;
     this.worktreeSelectedByUser = false;
@@ -488,6 +636,7 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.attachmentDraft.reset({ release: true });
     this.composerTextarea.disconnect();
     void this.gatewayNameTask.run([null, false, -1]);
+    void this.projectsTask.run([null, false, -1]);
     void this.cloudProfileTask.run([null, -1, false, ""]);
     this.resetCloudProfileRetry();
     super.disconnectedCallback();
@@ -574,12 +723,20 @@ class NewSessionPage extends OpenClawLightDomElement {
     return this.agents().find((agent) => normalizeAgentId(agent.id) === agentId);
   }
 
+  private selectedProject() {
+    return this.projects.find((project) => project.id === this.projectId);
+  }
+
   private execNodes(): DraftNode[] {
     return this.nodes.filter((node) => node.canExec);
   }
 
   private isAdmin(): boolean {
     return hasOperatorAdminAccess(this.context?.gateway.snapshot.hello?.auth ?? null);
+  }
+
+  private canWrite(): boolean {
+    return hasOperatorWriteAccess(this.context?.gateway.snapshot.hello?.auth ?? null);
   }
 
   private showStartInTerminal(): boolean {
@@ -630,11 +787,17 @@ class NewSessionPage extends OpenClawLightDomElement {
   }
 
   private usesCustomFolder(): boolean {
+    if (this.projectId) {
+      return false;
+    }
     const folder = this.folder.trim();
     return Boolean(folder) && folder !== this.workspacePath();
   }
 
   private folderSubmissionMode(): "blocked" | "approved" | "server" {
+    if (this.projectId) {
+      return this.selectedProject() ? "approved" : "blocked";
+    }
     if (this.restoredFolderValidation !== "none") {
       return "blocked";
     }
@@ -660,6 +823,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       model: this.modelControl.selected,
       thinkingLevel: this.modelControl.thinkingLevel,
       visibility,
+      projectId: this.projectId,
       worktree: this.worktree,
       baseRef: this.baseRef,
       worktreeName: this.worktreeName,
@@ -728,17 +892,51 @@ class NewSessionPage extends OpenClawLightDomElement {
     if (catalog.isTarget(this.data) || this.pendingCloud.sessionKey) {
       return null;
     }
-    return loadNewSessionPreference(this.gatewayUrl, this.agentId);
+    return this.preferenceMode === "remote"
+      ? (this.identityPreferences[normalizeAgentId(this.agentId)] ?? null)
+      : loadNewSessionPreference(this.gatewayUrl, this.agentId);
   }
 
   private persistPreference(patch: NewSessionPreference) {
     if (catalog.isTarget(this.data) || this.pendingCloud.sessionKey) {
       return;
     }
-    patchNewSessionPreference(this.gatewayUrl, this.agentId, {
+    const agentId = normalizeAgentId(this.agentId);
+    const nextPatch = {
       workspace: this.workspacePath(),
       ...patch,
-    });
+    };
+    if (this.preferenceMode === "local") {
+      patchNewSessionPreference(this.gatewayUrl, agentId, nextPatch);
+      return;
+    }
+    const scope = this.preferenceScope;
+    const client = this.gatewayClient;
+    const gatewayUrl = this.gatewayUrl;
+    const write = async () => {
+      await this.preferenceLoad;
+      if (!client || this.preferenceScope !== scope) {
+        return;
+      }
+      if (this.preferenceMode === "local") {
+        patchNewSessionPreference(gatewayUrl, agentId, nextPatch);
+        return;
+      }
+      const next = { ...this.identityPreferences[agentId], ...nextPatch };
+      try {
+        const result = await client.request<UsersPrefsSetResult>("users.prefs.set", {
+          entries: encodeIdentityPreferences({ [agentId]: next }),
+        });
+        if (result.status !== "ok" || this.preferenceScope !== scope) {
+          return;
+        }
+        this.identityPreferences = { ...this.identityPreferences, [agentId]: next };
+        replaceBrowserPreference(gatewayUrl, agentId, next);
+      } catch {
+        // Gateway state is authoritative for identified users; retain the last mirrored value.
+      }
+    };
+    this.preferenceWrite = this.preferenceWrite.then(write, write);
   }
 
   private cancelRestoredFolderValidation() {
@@ -871,6 +1069,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       : null;
     this.agentSelectedByUser = false;
     this.folder = "";
+    this.projectId = "";
     this.folderSelectedByUser = false;
     this.folderGatewayApproved = false;
     this.gatewayApprovedWorkspaceRoots = [];
@@ -999,13 +1198,18 @@ class NewSessionPage extends OpenClawLightDomElement {
     const baseRefEditGeneration = this.baseRefEditGeneration;
     this.repository = { kind: "idle" };
     this.baseRef = "";
+    const selectedProject = this.selectedProject();
     if (this.execNode) {
       this.preferredWorktreeRestore = false;
       return;
     }
-    const repoRoot = this.folder.trim() || this.workspacePath();
+    if (selectedProject && !selectedProject.repoRoot) {
+      this.preferredWorktreeRestore = false;
+      return;
+    }
+    const repoRoot = selectedProject?.repoRoot ?? (this.folder.trim() || this.workspacePath());
     const agent = this.selectedAgent();
-    const usesWorkspace = repoRoot === this.workspacePath();
+    const usesWorkspace = !selectedProject && repoRoot === this.workspacePath();
     if (!repoRoot) {
       this.preferredWorktreeRestore = false;
       return;
@@ -1094,6 +1298,9 @@ class NewSessionPage extends OpenClawLightDomElement {
     if (this.execNode) {
       return false;
     }
+    if (this.selectedProject()?.repoRoot) {
+      return true;
+    }
     if (this.repository.kind === "git") {
       return true;
     }
@@ -1142,6 +1349,7 @@ class NewSessionPage extends OpenClawLightDomElement {
     const gateway = this.context?.gateway;
     if (
       this.submitting ||
+      this.preferenceMode === "loading" ||
       this.requiresModelSetup() ||
       this.attachmentDraft.pendingReads > 0 ||
       (!pendingCloud && this.submissionOutcomeUnknown) ||
@@ -1281,6 +1489,7 @@ class NewSessionPage extends OpenClawLightDomElement {
         thinkingLevel: this.modelControl.thinkingLevel,
         visibility: draftRetired ? "normal" : this.visibility,
         attachments: cloudProfileId ? undefined : apiAttachments,
+        projectId: this.projectId,
         worktree: this.worktree,
         baseRef: this.baseRef,
         worktreeName: this.worktreeName,
@@ -1551,6 +1760,7 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.folderSelectedByUser = false;
     this.folderGatewayApproved = false;
     this.gatewayApprovedWorkspaceRoots = [];
+    this.projectId = "";
     this.preferredWorktreeRestore = false;
     this.worktreeSelectedByUser = false;
     this.cloudProfileId = "";
@@ -1583,6 +1793,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       return;
     }
     this.execNode = execNode;
+    this.projectId = "";
     this.cancelRestoredFolderValidation();
     if (execNode) {
       // Node sessions run on that device; a cloud worker cannot sync a node path.
@@ -1608,6 +1819,27 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.maybeLoadBranches();
   }
 
+  private selectProjectId(projectId: string) {
+    if (this.submitting || this.pendingCloud.sessionKey) {
+      return;
+    }
+    const project = this.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      return;
+    }
+    this.cancelRestoredFolderValidation();
+    this.projectId = project.id;
+    this.execNode = "";
+    this.cloudProfileId = "";
+    this.error = null;
+    this.folderSelectedByUser = false;
+    this.preferredWorktreeRestore = false;
+    this.worktreeSelectedByUser = true;
+    this.worktree = false;
+    this.worktreeName = "";
+    this.maybeLoadBranches();
+  }
+
   private selectExecNode(execNode: string) {
     if (this.submitting || this.pendingCloud.sessionKey) {
       return;
@@ -1627,6 +1859,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       this.folder = execNode ? "" : this.workspacePath();
       this.folderSelectedByUser = false;
       this.folderGatewayApproved = false;
+      this.projectId = "";
     }
     this.worktree = keepWorktree;
     this.closeBrowser();
@@ -1649,6 +1882,7 @@ class NewSessionPage extends OpenClawLightDomElement {
     // stays selected: its repo is what the managed worktree checks out and the
     // dispatch tunnel syncs to the cloud worker.
     this.cloudProfileId = profileId;
+    this.projectId = "";
     this.error = null;
     this.worktree = true;
     this.closeBrowser();
@@ -1676,6 +1910,8 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.browserError = null;
     this.browserListing = null;
     this.browserTarget = null;
+    this.browserProjectPath = null;
+    this.browserRegistering = false;
     this.browserPathDraft = "";
     this.placePopoverOpen = false;
     const popover = this.querySelector<HTMLElement & { open: boolean }>(
@@ -1711,6 +1947,8 @@ class NewSessionPage extends OpenClawLightDomElement {
     this.browserError = null;
     this.browserListing = null;
     this.browserTarget = null;
+    this.browserProjectPath = null;
+    this.browserRegistering = false;
     this.browserPathDraft = "";
   }
 
@@ -1749,6 +1987,7 @@ class NewSessionPage extends OpenClawLightDomElement {
     const requestId = ++this.browserRequestToken;
     this.browserLoading = true;
     this.browserError = null;
+    this.browserProjectPath = null;
     // Clear the previous directory immediately: keeping it clickable while the
     // request is in flight would let "Use this folder" apply the stale path.
     this.browserListing = null;
@@ -1775,6 +2014,25 @@ class NewSessionPage extends OpenClawLightDomElement {
         if (result?.path && this.browserPathDraft === draftAtRequest) {
           this.browserPathDraft = result.path;
         }
+        if (result?.path && !target.nodeId && this.isAdmin()) {
+          // Browse and worktree selection share the Gateway's Git-checkout verdict;
+          // fs.listDir stays a filesystem-only contract.
+          void client
+            .request<WorktreesBranchesResult>("worktrees.branches", {
+              repoRoot: result.path,
+              includeRepositoryStatus: true,
+            })
+            .then((branches) => {
+              if (
+                requestId === this.browserRequestToken &&
+                this.browserListing?.path === result.path &&
+                branches.repositoryStatus === "git"
+              ) {
+                this.browserProjectPath = result.path;
+              }
+            })
+            .catch(() => undefined);
+        }
       })
       .catch(() => {
         if (requestId !== this.browserRequestToken) {
@@ -1794,6 +2052,45 @@ class NewSessionPage extends OpenClawLightDomElement {
       });
   }
 
+  private async registerBrowserProject(path: string) {
+    const snapshot = this.context?.gateway.snapshot;
+    const client = snapshot?.client;
+    if (
+      snapshot?.phase !== "connected" ||
+      !client ||
+      !this.isAdmin() ||
+      this.browserTarget?.nodeId ||
+      this.browserProjectPath !== path ||
+      this.browserRegistering
+    ) {
+      return;
+    }
+    const requestId = this.browserRequestToken;
+    const connectionEpoch = this.gatewayConnectionEpoch;
+    this.browserRegistering = true;
+    this.browserError = null;
+    try {
+      const project = await client.request<ProjectsRegisterResult>("projects.register", { path });
+      if (requestId !== this.browserRequestToken || client !== this.gatewayClient) {
+        return;
+      }
+      await this.projectsTask.run([client, true, connectionEpoch]);
+      if (requestId !== this.browserRequestToken || client !== this.gatewayClient) {
+        return;
+      }
+      this.selectProjectId(project.id);
+      this.closeBrowser();
+    } catch (error) {
+      if (requestId === this.browserRequestToken && client === this.gatewayClient) {
+        this.browserError = error instanceof Error ? error.message : String(error);
+      }
+    } finally {
+      if (requestId === this.browserRequestToken) {
+        this.browserRegistering = false;
+      }
+    }
+  }
+
   private renderAgentSelect(agents: ReturnType<NewSessionPage["agents"]>) {
     return renderAgentSelect({
       agents,
@@ -1811,9 +2108,13 @@ class NewSessionPage extends OpenClawLightDomElement {
     return renderPlaceSelect({
       browseAvailable: this.browseAvailable(),
       isAdmin: this.isAdmin(),
+      canWrite: this.canWrite(),
       folder: this.folder,
       workspace: this.workspacePath(),
       workspaceRoots: this.knownWorkspaceRoots(),
+      projects: catalog.isTarget(this.data) ? [] : this.projects,
+      recents: catalog.isTarget(this.data) ? [] : this.projectRecents,
+      projectId: this.projectId,
       sessions: this.context?.sessions.state.result?.sessions ?? [],
       execNodes: this.isAdmin() ? execNodes : [],
       gatewayName: this.gatewayName,
@@ -1853,6 +2154,8 @@ class NewSessionPage extends OpenClawLightDomElement {
       browserError: this.browserError,
       browserPathDraft: this.browserPathDraft,
       usableBrowserPath: this.usableBrowserPath(),
+      registerProjectPath: this.browserProjectPath,
+      registeringProject: this.browserRegistering,
       onGuardTransition: (event) => this.guardPopoverTransition(event, this.placePopoverHiding),
       onPopoverShow: () => {
         this.placePopoverOpen = true;
@@ -1869,6 +2172,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       },
       onSelectExecNode: (nodeId) => this.selectExecNode(nodeId),
       onSelectCloudProfile: (profileId) => this.selectCloudProfile(profileId),
+      onSelectProject: (projectId) => this.selectProjectId(projectId),
       onApplyFolder: (folder, execNode) =>
         this.applyFolder(folder, execNode, !execNode && this.browserListing?.path === folder),
       onBrowse: (target) => this.selectBrowserTarget(target),
@@ -1877,6 +2181,7 @@ class NewSessionPage extends OpenClawLightDomElement {
       },
       onBrowserNavigate: (path) => this.loadBrowser(path),
       onBrowserBack: () => this.showBrowserRoot(),
+      onRegisterProject: (path) => void this.registerBrowserProject(path),
       onClose: () => this.closeBrowser(),
       onToggleWorktree: () => {
         if (this.cloudProfileId) {
@@ -1889,7 +2194,7 @@ class NewSessionPage extends OpenClawLightDomElement {
           folder: this.folder.trim() || this.workspacePath(),
           worktree: this.worktree,
         });
-        if (this.worktree) {
+        if (this.worktree && this.repository.kind !== "git") {
           this.maybeLoadBranches();
         }
       },
