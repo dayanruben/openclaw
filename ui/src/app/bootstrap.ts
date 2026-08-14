@@ -38,13 +38,13 @@ import type {
   ApplicationThemeServerSelection,
 } from "./context.ts";
 import { syncCustomThemeStyleTag } from "./custom-theme.ts";
+import { isDesktopDocumentPath, isDesktopOnlyView } from "./desktop-document-mode.ts";
 import { createApplicationGateway } from "./gateway-store.ts";
 import { createInitialUserMessageHandoff } from "./initial-user-message-handoff.ts";
 import { createNativeChatDrafts } from "./native-bridge.ts";
 import { startNativeLinkRouting } from "./native-link-routing.ts";
 import { createNativeNotificationsCapability } from "./native-notifications.ts";
 import { createApplicationOverlays } from "./overlays.ts";
-import { navigateWithRouteTransition } from "./route-transition.ts";
 import {
   loadSettings,
   patchSettings,
@@ -56,7 +56,7 @@ import {
 import { createSkillWorkshopRevisionHandoff } from "./skill-workshop-revision-handoff.ts";
 import { createStartupLifecycle, type StartupStep } from "./startup-lifecycle.ts";
 import { resolveApplicationStartupSettings } from "./startup-settings.ts";
-import { isTerminalDocumentPath } from "./terminal-document-mode.ts";
+import { isTerminalDocumentPath, isTerminalOnlyView } from "./terminal-document-mode.ts";
 import { startThemeTransition } from "./theme-transition.ts";
 import { resolveTheme, type ThemeMode } from "./theme.ts";
 import { createWebPushCapability } from "./web-push.ts";
@@ -271,9 +271,18 @@ export function bootstrapApplication(
   const basePath = resolveControlUiBasePath(
     startup.location.pathname || globalThis.location?.pathname || "/",
   );
-  const terminalDocument = isTerminalDocumentPath(startup.location.pathname, basePath);
+  const standaloneDocument =
+    isTerminalDocumentPath(startup.location.pathname, basePath) ||
+    isDesktopDocumentPath(startup.location.pathname, basePath);
   const firstRunDefaultLanding =
     documentMode === null && isDefaultChatLanding(startup.location, basePath, routeIdFromPath);
+  // A `?view=` document mode still lands on the chat path, so it counts as the default landing
+  // for routing, but it is an explicit destination that renders its own surface. Redirecting it
+  // into model setup strands native app webviews on a blank page, so only gate the redirect.
+  const firstRunRedirectEnabled =
+    firstRunDefaultLanding &&
+    !isTerminalOnlyView(startup.location, basePath) &&
+    !isDesktopOnlyView(startup.location, basePath);
   const sessionPathBuilderReady =
     dependencies.sessionPathBuilderReady ??
     (documentMode
@@ -367,9 +376,9 @@ export function bootstrapApplication(
   const chatAttachmentHandoff = createChatAttachmentHandoff();
   applyThemePresentation(settings);
   const router = createApplicationRouter();
-  // /terminal is served by the Gateway's SPA fallback but renders before the
-  // shell; starting the page router would rewrite this special document to /chat.
-  const startsApplicationRouter = documentMode === null && !terminalDocument;
+  // Standalone terminal and desktop paths render before the shell; starting
+  // the page router would rewrite these special documents to /chat.
+  const startsApplicationRouter = documentMode === null && !standaloneDocument;
   let routerStarted = false;
   // Pre-start navigations are invisible to history; retain the latest request so
   // router.start() cannot resolve the stale browser URL over the user's route.
@@ -457,19 +466,11 @@ export function bootstrapApplication(
     if (!routerStarted) {
       pendingRouterStartNavigation = { routeId, location, mode: "push" };
     }
-    // New-session submission awaits this promise so its live progress remains
-    // visible until the destination route has completed the UI handoff.
-    return navigateWithRouteTransition({
-      document,
-      from: router.getState().matches[0]?.routeId,
-      to: routeId,
-      prefersReducedMotion:
-        globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
-      prepare: () => router.preloadLocation(location, context),
-      navigate: () => router.navigate(routeId, context, { history: "push" }, location),
-    }).catch((error: unknown) => {
+    const navigationPromise = router.navigate(routeId, context, { history: "push" }, location);
+    void navigationPromise.catch((error: unknown) => {
       console.error("[openclaw] route navigation failed", error);
     });
+    return navigationPromise;
   };
   const context: ApplicationContext<RouteId> = {
     basePath,
@@ -508,7 +509,7 @@ export function bootstrapApplication(
         });
     },
     revalidate: (routeId) => router.revalidate(context, routeId),
-    preload: (routeId) => router.preloadRoute(routeId, context),
+    preload: (routeId, options) => router.preloadLocation(routeLocation(routeId, options), context),
   };
   return {
     context,
@@ -535,7 +536,7 @@ export function bootstrapApplication(
         steps.push(() =>
           startModelSetupFirstRunRedirectAfterLocation({
             context,
-            enabled: firstRunDefaultLanding,
+            enabled: firstRunRedirectEnabled,
             history,
             initialLocationReady,
           }),
@@ -563,7 +564,7 @@ export function bootstrapApplication(
           startupLifecycle.trackDisposer(
             startModelSetupFirstRunRedirectAfterLocation({
               context,
-              enabled: firstRunDefaultLanding,
+              enabled: firstRunRedirectEnabled,
               history,
               initialLocationReady,
               installLocation: async (location) => {
