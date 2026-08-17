@@ -19,6 +19,7 @@ import {
 function createState(overrides: Partial<ChatState> = {}): ChatState {
   return {
     chatAttachments: [],
+    chatHistoryPagination: { hasMore: false },
     chatLoading: false,
     chatMessage: "",
     chatMessages: [],
@@ -939,8 +940,9 @@ describe("handleChatGatewayEvent", () => {
           text: "Use the deployment plan",
           createdAt: 3,
           kind: "steered",
-          pendingRunId: "active-run",
+          pendingRunId: "steer-request-run",
           sendRunId: "steer-request-run",
+          steerTargetRunId: "active-run",
           sessionKey: "main",
         },
       ],
