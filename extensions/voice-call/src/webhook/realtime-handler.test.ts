@@ -91,6 +91,20 @@ const PROVIDER_WITH_LOCAL_BARGE_IN_CAPABILITIES = {
   supportsBargeIn: true,
 } satisfies NonNullable<RealtimeVoiceProviderPlugin["capabilities"]>;
 
+function makeCallRegistrationResolver(params: {
+  provider: RealtimeVoiceProviderPlugin;
+  providerConfig: Record<string, unknown>;
+  instructions: string;
+  resolveInstructions?: (call: CallRecord) => string;
+}) {
+  return (call: CallRecord) => ({
+    agentId: call.agentId ?? "main",
+    provider: params.provider,
+    providerConfig: params.providerConfig,
+    instructions: params.resolveInstructions?.(call) ?? params.instructions,
+  });
+}
+
 function makeHandler(
   overrides?: Partial<VoiceCallRealtimeConfig>,
   deps?: {
@@ -125,6 +139,8 @@ function makeHandler(
     providers: overrides?.providers ?? {},
     ...(overrides?.provider ? { provider: overrides.provider } : {}),
   };
+  const realtimeProvider = deps?.realtimeProvider ?? makeRealtimeProvider(() => makeBridge());
+  const providerConfig = deps?.providerConfig ?? { apiKey: "test-key" };
   return new RealtimeCallHandler(
     config,
     {
@@ -145,11 +161,14 @@ function makeHandler(
       getCallStatus: vi.fn(),
       ...deps?.provider,
     } as unknown as VoiceCallProvider,
-    deps?.realtimeProvider ?? makeRealtimeProvider(() => makeBridge()),
-    deps?.providerConfig ?? { apiKey: "test-key" },
+    makeCallRegistrationResolver({
+      provider: realtimeProvider,
+      providerConfig,
+      instructions: config.instructions,
+      resolveInstructions: deps?.resolveInstructions,
+    }),
     "/voice/webhook",
     undefined,
-    deps?.resolveInstructions,
   );
 }
 
@@ -572,6 +591,7 @@ describe("RealtimeCallHandler path routing", () => {
           }),
         );
         expect(createBridge.mock.calls[0]?.[0].instructions).toBe("instructions:support");
+        expect(createBridge.mock.calls[0]?.[0].agentId).toBe("support");
       } finally {
         if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
           ws.close();
@@ -1896,8 +1916,7 @@ describe("RealtimeCallHandler path routing", () => {
         });
         expect(clearAudio).toHaveBeenCalledTimes(2);
         expect(oldSendUserMessage).not.toHaveBeenCalled();
-        expect(oldCoordinator.handles()).toContainEqual(oldForcedHandle);
-        expect(oldCoordinator.isCancelled(oldForcedHandle)).toBe(true);
+        expect(oldCoordinator.handles()).not.toContainEqual(oldForcedHandle);
 
         const oldClosed = waitForClose(oldWs);
         oldWs.close();
@@ -1933,7 +1952,7 @@ describe("RealtimeCallHandler path routing", () => {
     }
   });
 
-  it("isolates replacement transcripts and late old bridge events", async () => {
+  it("retires predecessor audio and isolates late bridge events from its replacement", async () => {
     const callbacks: RealtimeBridgeRequest[] = [];
     const oldCloseBridge = vi.fn();
     const replacementCloseBridge = vi.fn();
@@ -1983,6 +2002,10 @@ describe("RealtimeCallHandler path routing", () => {
 
       replacementServer = await startRealtimeServer(handler);
       const replacementWs = await connectWs(replacementServer.url);
+      const replacementOutboundMessages: Array<Record<string, unknown>> = [];
+      replacementWs.on("message", (data) => {
+        replacementOutboundMessages.push(parseWebSocketMessage(data));
+      });
       try {
         replacementWs.send(
           JSON.stringify({
@@ -1995,6 +2018,23 @@ describe("RealtimeCallHandler path routing", () => {
         );
         await waitForRealtimeTest(() => {
           expect(callbacks).toHaveLength(2);
+          expect(oldCloseBridge).toHaveBeenCalledOnce();
+        });
+
+        callbacks[0]?.onAudio(Buffer.from([0x01]));
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
+        expect(replacementOutboundMessages).toHaveLength(0);
+
+        callbacks[1]?.onAudio(Buffer.from([0x02]));
+        await waitForRealtimeTest(() => {
+          expect(replacementOutboundMessages).toEqual([
+            expect.objectContaining({
+              event: "media",
+              media: { payload: Buffer.from([0x02]).toString("base64") },
+            }),
+          ]);
         });
 
         callbacks[0]?.onTranscript?.("user", "stale partial", false);
