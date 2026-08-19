@@ -3,19 +3,29 @@ import type {
   WorkboardExecutionStatus,
   WorkboardStatus,
 } from "@openclaw/workboard-contract";
+import { resolveGlobalSingleton } from "openclaw/plugin-sdk/global-singleton";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { OpenClawPluginApi, OpenClawPluginService } from "../api.js";
 import {
   workboardCardMatchesLifecycleLink,
   workboardCardSessionLookupKey,
 } from "./session-link.js";
-import { cardSessionKey } from "./store-card-helpers.js";
+import { cardRunId, cardSessionKey } from "./store-card-helpers.js";
 import { DEFAULT_WORKBOARD_DISPATCH_OWNER } from "./store-constants.js";
 import type { WorkboardStore } from "./store.js";
 
 const WORKBOARD_LIFECYCLE_SWEEP_MS = 60_000;
 const WORKBOARD_STALE_SESSION_MS = 30 * 60 * 1000;
 const WORKBOARD_SESSION_SWEEP_LIMIT = 10_000;
+// Keep readiness across plugin-only reloads, while the singleton lifecycle
+// clears it before an in-process Gateway restart starts replacement services.
+const workboardLifecycleGatewayState = resolveGlobalSingleton(
+  Symbol.for("openclaw.workboard.lifecycleGatewayState"),
+  () => ({ ready: false }),
+  (state) => {
+    state.ready = false;
+  },
+);
 
 type WorkboardLifecycleState = "running" | "succeeded" | "failed" | "idle" | "missing" | "stale";
 
@@ -51,6 +61,11 @@ type WorkboardLifecycleMatchHandler = (input: {
   sessionKey?: string;
 }) => Promise<void>;
 
+type WorkboardLifecycleService = OpenClawPluginService & {
+  onGatewayStart: () => void;
+  onGatewayStop: () => void;
+};
+
 function needsWorkboardLifecycleReconciliation(card: WorkboardCard): boolean {
   if (card.metadata?.archivedAt) {
     return false;
@@ -84,6 +99,12 @@ async function syncWorkboardCardLifecycle(params: {
   cardId: string;
   observation: WorkboardLifecycleObservation;
   now: number;
+  association?: {
+    expectedSessionKey?: string;
+    expectedRunId?: string;
+    sessionKey: string;
+    runId?: string;
+  };
 }): Promise<boolean> {
   const target = LIFECYCLE_TARGETS[params.observation.state];
   return await params.store.syncLifecycle(params.cardId, {
@@ -92,6 +113,7 @@ async function syncWorkboardCardLifecycle(params: {
     sourceUpdatedAt: params.observation.sourceUpdatedAt,
     stale: params.observation.stale,
     now: params.now,
+    ...(params.association ? { association: params.association } : {}),
   });
 }
 
@@ -106,7 +128,23 @@ async function syncWorkboardLifecycleEvent(params: {
     (card) => !card.metadata?.archivedAt && workboardCardMatchesLifecycleLink(card, params.source),
   );
   const updates = Promise.all(
-    cards.map(async (card) => await syncWorkboardCardLifecycle({ ...params, cardId: card.id })),
+    cards.map(
+      async (card) =>
+        await syncWorkboardCardLifecycle({
+          ...params,
+          cardId: card.id,
+          ...(params.source.sessionKey
+            ? {
+                association: {
+                  ...(cardSessionKey(card) ? { expectedSessionKey: cardSessionKey(card) } : {}),
+                  ...(cardRunId(card) ? { expectedRunId: cardRunId(card) } : {}),
+                  sessionKey: params.source.sessionKey,
+                  ...(params.source.runId ? { runId: params.source.runId } : {}),
+                },
+              }
+            : {}),
+        }),
+    ),
   );
   await Promise.all([
     updates,
@@ -255,7 +293,21 @@ async function syncWorkboardLifecycleSessions(params: {
         : undefined;
     if (
       observation &&
-      (await syncWorkboardCardLifecycle({ store: params.store, cardId: card.id, observation, now }))
+      (await syncWorkboardCardLifecycle({
+        store: params.store,
+        cardId: card.id,
+        observation,
+        now,
+        ...(session
+          ? {
+              association: {
+                ...(cardSessionKey(card) ? { expectedSessionKey: cardSessionKey(card) } : {}),
+                ...(cardRunId(card) ? { expectedRunId: cardRunId(card) } : {}),
+                sessionKey: session.key,
+              },
+            }
+          : {}),
+      }))
     ) {
       count += 1;
     }
@@ -333,13 +385,23 @@ export function createWorkboardLifecycleService(params: {
     options: WorkboardLifecycleSessionReadOptions,
   ) => Promise<WorkboardLifecycleSessionSnapshot>;
   now?: () => number;
-}): OpenClawPluginService {
+}): WorkboardLifecycleService {
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let begin: (() => void) | undefined;
+  const stop = () => {
+    generation += 1;
+    begin = undefined;
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
   return {
     id: "workboard-lifecycle-sync",
     start(ctx) {
       const owner = ++generation;
+      let begun = false;
       const reconcile = async () => {
         try {
           const cards = await params.store.list();
@@ -370,15 +432,27 @@ export function createWorkboardLifecycleService(params: {
           }
         }
       };
-      // This service owns one bounded session sweep; terminal hooks keep end-state writes immediate.
-      void reconcile();
-    },
-    stop() {
-      generation += 1;
-      if (timer) {
-        clearTimeout(timer);
-        timer = undefined;
+      begin = () => {
+        if (generation !== owner || begun) {
+          return;
+        }
+        begun = true;
+        // The Gateway lifecycle signal owns the first bounded sweep; terminal
+        // hooks keep end-state writes immediate between 60-second sweeps.
+        void reconcile();
+      };
+      if (workboardLifecycleGatewayState.ready) {
+        begin();
       }
+    },
+    stop,
+    onGatewayStart() {
+      workboardLifecycleGatewayState.ready = true;
+      begin?.();
+    },
+    onGatewayStop() {
+      workboardLifecycleGatewayState.ready = false;
+      stop();
     },
   };
 }
