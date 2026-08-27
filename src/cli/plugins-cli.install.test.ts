@@ -1597,6 +1597,56 @@ describe("plugins cli install", () => {
     },
   );
 
+  it("installs the beta artifact for an official ClawHub plugin on a beta gateway", async () => {
+    primeSuccessfulClawHubPluginInstall();
+    parseClawHubPluginSpecMock.mockReturnValue({ name: "@openclaw/brave-plugin" });
+    pluginCliConfigMock.mockReturnValue({
+      ...createEmptyPluginConfig(),
+      update: { channel: "beta" },
+    } as OpenClawConfig);
+
+    await runPluginsCommand(["plugins", "install", "clawhub:@openclaw/brave-plugin"]);
+
+    expect(clawHubInstallCall().spec).toBe("clawhub:@openclaw/brave-plugin@beta");
+  });
+
+  it("does not install a stable ClawHub release when no beta release exists", async () => {
+    primeSuccessfulClawHubPluginInstall();
+    parseClawHubPluginSpecMock.mockReturnValue({ name: "@openclaw/brave-plugin" });
+    pluginCliConfigMock.mockReturnValue({
+      ...createEmptyPluginConfig(),
+      update: { channel: "beta" },
+    } as OpenClawConfig);
+    installPluginFromClawHubMock.mockResolvedValue({
+      ok: false,
+      error: "Version not found on ClawHub: @openclaw/brave-plugin@beta.",
+      code: "version_not_found",
+    });
+
+    await expect(
+      runPluginsCommand(["plugins", "install", "clawhub:@openclaw/brave-plugin"]),
+    ).rejects.toThrow("__exit__:1");
+
+    expect(clawHubInstallCall(0).spec).toBe("clawhub:@openclaw/brave-plugin@beta");
+    expect(installPluginFromClawHubMock).toHaveBeenCalledTimes(1);
+    expect(configWriteMock).not.toHaveBeenCalled();
+    expect(runtimeErrors.at(-1)).toContain(
+      "No clawhub:@openclaw/brave-plugin@beta release is published for this gateway",
+    );
+  });
+
+  it("leaves a non-official ClawHub install on the operator selector", async () => {
+    primeSuccessfulClawHubPluginInstall();
+    pluginCliConfigMock.mockReturnValue({
+      ...createEmptyPluginConfig(),
+      update: { channel: "beta" },
+    } as OpenClawConfig);
+
+    await runPluginsCommand(["plugins", "install", "clawhub:demo"]);
+
+    expect(clawHubInstallCall().spec).toBe("clawhub:demo");
+  });
+
   it("does not show the non-ClawHub warning for explicit ClawHub installs", async () => {
     primeSuccessfulClawHubPluginInstall();
     await runPluginsCommand(["plugins", "install", "clawhub:demo"]);
@@ -1925,6 +1975,54 @@ describe("plugins cli install", () => {
     expect(configWriteMock).toHaveBeenCalledWith(enabledCfg);
   });
 
+  it.each([
+    { label: "plugin id", arg: "brave" },
+    { label: "npm package name", arg: "@openclaw/brave-plugin" },
+  ])(
+    "installs the beta artifact for an official plugin on a beta gateway by $label",
+    async ({ arg }) => {
+      primeSuccessfulPluginPersistence("brave");
+      pluginCliConfigMock.mockReturnValue({
+        ...createEmptyPluginConfig(),
+        update: { channel: "beta" },
+      } as OpenClawConfig);
+      findBundledPluginSourceMock.mockReturnValue(undefined);
+      installPluginFromNpmSpecMock.mockResolvedValue(createNpmPluginInstallResult("brave"));
+
+      await runPluginsCommand(["plugins", "install", arg]);
+
+      expect(npmInstallCall().spec).toBe("@openclaw/brave-plugin@beta");
+      expect(npmInstallCall().trustedSourceLinkedOfficialInstall).toBe(true);
+      // The record keeps the operator's selector so a later channel change is
+      // not silently pinned to the beta dist-tag.
+      expect(persistedInstallRecord("brave").spec).toBe("@openclaw/brave-plugin");
+    },
+  );
+
+  it("does not install the stable release when no beta artifact is published", async () => {
+    primeSuccessfulPluginPersistence("brave");
+    pluginCliConfigMock.mockReturnValue({
+      ...createEmptyPluginConfig(),
+      update: { channel: "beta" },
+    } as OpenClawConfig);
+    findBundledPluginSourceMock.mockReturnValue(undefined);
+    installPluginFromNpmSpecMock.mockResolvedValue({
+      ok: false,
+      error: "npm error code ETARGET No matching version found for @openclaw/brave-plugin@beta",
+      code: "npm_package_not_found",
+    });
+
+    await expect(runPluginsCommand(["plugins", "install", "brave"])).rejects.toThrow("__exit__:1");
+
+    expect(npmInstallCall(0).spec).toBe("@openclaw/brave-plugin@beta");
+    expect(installPluginFromNpmSpecMock).toHaveBeenCalledTimes(1);
+    expect(installHooksFromNpmSpecMock).not.toHaveBeenCalled();
+    expect(configWriteMock).not.toHaveBeenCalled();
+    expect(runtimeErrors.at(-1)).toContain(
+      "No @openclaw/brave-plugin@beta release is published for this gateway",
+    );
+  });
+
   it("passes third-party external catalog integrity with catalog install trust", async () => {
     primeSuccessfulPluginPersistence("wecom-openclaw-plugin");
     findBundledPluginSourceMock.mockReturnValue(undefined);
@@ -1934,10 +2032,10 @@ describe("plugins cli install", () => {
 
     await runPluginsCommand(["plugins", "install", "wecom"]);
 
-    expect(npmInstallCall().spec).toBe("@wecom/wecom-openclaw-plugin@2026.5.7");
+    expect(npmInstallCall().spec).toBe("@wecom/wecom-openclaw-plugin@2026.7.2");
     expect(npmInstallCall().expectedPluginId).toBe("wecom-openclaw-plugin");
     expect(npmInstallCall().expectedIntegrity).toBe(
-      "sha512-TCkP9as00WfEhgFWG8YL/rcmaWGIshAki2HQh83nTRccGfVBCoGjrEboTTqq3yDmK9koWTV11zi8u8A4dNtvug==",
+      "sha512-7kqdBIOF3SgDDoBoFtO6jxnxofbYSgbKdxZDNabD0y0jg2xKcVqlXZOOJ9+XQho/QOtIFrnRH2IRnPukFEYwJg==",
     );
     expect(npmInstallCall().trustedSourceLinkedOfficialInstall).toBe(true);
   });
@@ -1980,15 +2078,15 @@ describe("plugins cli install", () => {
     installHooksFromNpmSpecMock.mockResolvedValue({
       ok: false,
       error:
-        "aborted: npm package integrity drift detected for @wecom/wecom-openclaw-plugin@2026.5.7",
+        "aborted: npm package integrity drift detected for @wecom/wecom-openclaw-plugin@2026.7.2",
     });
 
     await expect(runPluginsCommand(["plugins", "install", "wecom"])).rejects.toThrow("__exit__:1");
 
     expect(npmInstallCall().trustedSourceLinkedOfficialInstall).toBe(true);
-    expect(hookNpmInstallCall().spec).toBe("@wecom/wecom-openclaw-plugin@2026.5.7");
+    expect(hookNpmInstallCall().spec).toBe("@wecom/wecom-openclaw-plugin@2026.7.2");
     expect(hookNpmInstallCall().expectedIntegrity).toBe(
-      "sha512-TCkP9as00WfEhgFWG8YL/rcmaWGIshAki2HQh83nTRccGfVBCoGjrEboTTqq3yDmK9koWTV11zi8u8A4dNtvug==",
+      "sha512-7kqdBIOF3SgDDoBoFtO6jxnxofbYSgbKdxZDNabD0y0jg2xKcVqlXZOOJ9+XQho/QOtIFrnRH2IRnPukFEYwJg==",
     );
   });
 

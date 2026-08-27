@@ -34,8 +34,6 @@ vi.resetModules();
 
 const { installPluginFromNpmPackArchive, installPluginFromNpmSpec, PLUGIN_INSTALL_ERROR_CODE } =
   await import("./install.js");
-const { classifyNpmManagedOverrideCompatibilityError } =
-  await import("./install-managed-npm-state.js");
 
 const suiteTempRootTracker = createSyncSuiteTempRootTracker("openclaw-plugin-install-npm-spec");
 let previousNpmGlobalConfig: string | undefined;
@@ -222,6 +220,7 @@ function writeInstalledNpmPlugin(params: {
   packageName: string;
   version: string;
   pluginId?: string;
+  nativeManifest?: "missing" | "malformed";
   legacyPluginIds?: string[];
   indexJs?: string;
   extraDistFiles?: Record<string, string>;
@@ -249,16 +248,20 @@ function writeInstalledNpmPlugin(params: {
     }),
     "utf-8",
   );
-  fs.writeFileSync(
-    path.join(pluginDir, "openclaw.plugin.json"),
-    JSON.stringify({
-      id: params.pluginId ?? params.packageName,
-      name: params.pluginId ?? params.packageName,
-      ...(params.legacyPluginIds ? { legacyPluginIds: params.legacyPluginIds } : {}),
-      configSchema: { type: "object" },
-    }),
-    "utf-8",
-  );
+  if (params.nativeManifest !== "missing") {
+    fs.writeFileSync(
+      path.join(pluginDir, "openclaw.plugin.json"),
+      params.nativeManifest === "malformed"
+        ? "{invalid plugin manifest"
+        : JSON.stringify({
+            id: params.pluginId ?? params.packageName,
+            name: params.pluginId ?? params.packageName,
+            ...(params.legacyPluginIds ? { legacyPluginIds: params.legacyPluginIds } : {}),
+            configSchema: { type: "object" },
+          }),
+      "utf-8",
+    );
+  }
   fs.writeFileSync(
     path.join(pluginDir, "dist", "index.js"),
     params.indexJs ?? "export {};",
@@ -302,6 +305,7 @@ type MockNpmPackage = {
   version: string;
   npmRoot: string;
   pluginId?: string;
+  nativeManifest?: "missing" | "malformed";
   legacyPluginIds?: string[];
   integrity?: string;
   shasum?: string;
@@ -736,22 +740,6 @@ beforeAll(async () => {
 });
 
 describe("installPluginFromNpmSpec", () => {
-  it.each([
-    "npm ERR! Invalid comparator: npm:@nolyfill/domexception@1.0.28",
-    'npm error code EINVALIDTAGNAME\nnpm error Invalid tag name "0.2.2>ip" of package "werift-ice@0.2.2>ip"',
-    "npm error Override without name: @scope/parent>child",
-    'npm error code EINVALIDPACKAGENAME\nnpm error Invalid package name "parent>" of package "parent>@scope/child"',
-  ])("detects npm-incompatible managed override errors", (stderr) => {
-    expect(classifyNpmManagedOverrideCompatibilityError({ stdout: "", stderr })).toBeDefined();
-  });
-
-  it.each([
-    'npm error code EINVALIDTAGNAME\nnpm error Invalid tag name "next" of package "pkg@next"',
-    'npm error code EINVALIDPACKAGENAME\nnpm error Invalid package name "bad name" of package "bad name@1"',
-  ])("ignores unrelated npm package validation errors", (stderr) => {
-    expect(classifyNpmManagedOverrideCompatibilityError({ stdout: "", stderr })).toBeUndefined();
-  });
-
   it("classifies npm metadata command failures", async () => {
     runCommandWithTimeoutMock.mockResolvedValue(failedSpawn("registry unavailable"));
 
@@ -3042,7 +3030,7 @@ describe("installPluginFromNpmSpec", () => {
     }
   });
 
-  it("retries without each npm-incompatible override kind while preserving valid rules", async () => {
+  it("normalizes selectors before npm planning and retries only unsupported aliases", async () => {
     const npmRoot = path.join(suiteTempRootTracker.makeTempDir(), "npm");
     const hostRoot = suiteTempRootTracker.makeTempDir();
     fs.writeFileSync(
@@ -3083,6 +3071,13 @@ describe("installPluginFromNpmSpec", () => {
     let installAttempts = 0;
     runCommandWithTimeoutMock.mockImplementation(
       async (argv: string[], options?: { cwd?: string }) => {
+        if (isNpmPeerPlannerInstallCommand(argv)) {
+          const manifest = JSON.parse(
+            fs.readFileSync(path.join(options?.cwd ?? "", "package.json"), "utf8"),
+          ) as { overrides?: Record<string, unknown> };
+          expect(manifest.overrides).not.toHaveProperty("werift-ice@0.2.2>ip");
+          expect(manifest.overrides?.["range-target@>1"]).toBe("2.0.0");
+        }
         if (isManagedNpmInstallCommand(argv)) {
           installAttempts += 1;
           const npmProjectRoot = options?.cwd;
@@ -3097,25 +3092,7 @@ describe("installPluginFromNpmSpec", () => {
               "npm:@nolyfill/domexception@1.0.28",
             );
             expect(manifest.overrides?.["range-target@>1"]).toBe("2.0.0");
-            expect(manifest.overrides?.["werift-ice@0.2.2>ip"]).toBe("npm:neoip@3.1.0");
-            expect(manifest.openclaw?.managedOverrides).toEqual([
-              "axios",
-              "nested",
-              "node-domexception",
-              "range-target@>1",
-              "werift-ice@0.2.2>ip",
-            ]);
-            return {
-              code: 1,
-              stdout: "",
-              stderr:
-                'npm error code EINVALIDTAGNAME\nnpm error Invalid tag name "0.2.2>ip" of package "werift-ice@0.2.2>ip"',
-              signal: null,
-              killed: false,
-              termination: "exit" as const,
-            };
-          }
-          if (installAttempts === 2) {
+            expect(manifest.overrides).not.toHaveProperty("werift-ice@0.2.2>ip");
             expect(manifest.overrides).toEqual({
               axios: "1.18.0",
               nested: {
@@ -3165,9 +3142,8 @@ describe("installPluginFromNpmSpec", () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(installAttempts).toBe(3);
+    expect(installAttempts).toBe(2);
     expect(warnings).toEqual([
-      "npm rejected managed npm overrides; retrying plugin install without npm-incompatible overrides for this npm version.",
       "npm rejected managed npm overrides; retrying plugin install without npm-incompatible overrides for this npm version.",
     ]);
   });
@@ -3425,6 +3401,88 @@ describe("installPluginFromNpmSpec", () => {
       });
     },
   );
+
+  it.each([
+    {
+      name: "missing manifest with a different expected id",
+      packageName: "@openclaw/comfy-provider",
+      expectedPluginId: "comfy",
+      nativeManifest: "missing",
+    },
+    {
+      name: "missing manifest even when the package name matches the expected id",
+      packageName: "@openclaw/official-placeholder",
+      expectedPluginId: "@openclaw/official-placeholder",
+      nativeManifest: "missing",
+    },
+    {
+      name: "malformed manifest",
+      packageName: "@openclaw/official-malformed",
+      expectedPluginId: "official-malformed",
+      nativeManifest: "malformed",
+    },
+  ] as const)("rejects a trusted official npm plugin with a $name", async (testCase) => {
+    const npmRoot = path.join(suiteTempRootTracker.makeTempDir(), "npm");
+    const npmProjectRoot = resolvePluginNpmProjectDir({
+      npmDir: npmRoot,
+      packageName: testCase.packageName,
+    });
+    mockNpmViewAndInstall({
+      spec: testCase.packageName,
+      packageName: testCase.packageName,
+      version: "0.0.0",
+      pluginId: testCase.expectedPluginId,
+      nativeManifest: testCase.nativeManifest,
+      npmRoot,
+    });
+
+    const result = await installPluginFromNpmSpec({
+      spec: testCase.packageName,
+      npmDir: npmRoot,
+      expectedPluginId: testCase.expectedPluginId,
+      trustedSourceLinkedOfficialInstall: true,
+      logger: { info: () => {}, warn: () => {} },
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      return;
+    }
+    expect(result.code).toBe(PLUGIN_INSTALL_ERROR_CODE.MISSING_PLUGIN_MANIFEST);
+    expect(result.error).toContain("package missing valid openclaw.plugin.json");
+    expect(result.error).not.toContain("plugin id mismatch");
+    expect(fs.existsSync(resolveTestPluginPackageDir(npmRoot, testCase.packageName))).toBe(false);
+    expect(fs.existsSync(path.join(npmProjectRoot, "package.json"))).toBe(false);
+    expect(fs.existsSync(path.join(npmProjectRoot, "package-lock.json"))).toBe(false);
+    expect(fs.existsSync(path.join(npmProjectRoot, "node_modules"))).toBe(false);
+  });
+
+  it("preserves untrusted manifestless npm updates keyed by the legacy package name", async () => {
+    const packageName = "@third-party/legacy-plugin";
+    const npmRoot = path.join(suiteTempRootTracker.makeTempDir(), "npm");
+    mockNpmViewAndInstall({
+      spec: packageName,
+      packageName,
+      version: "1.0.0",
+      nativeManifest: "missing",
+      npmRoot,
+    });
+
+    const result = await installPluginFromNpmSpec({
+      spec: packageName,
+      npmDir: npmRoot,
+      expectedPluginId: "legacy-plugin",
+      trustedSourceLinkedOfficialInstall: false,
+      mode: "update",
+      logger: { info: () => {}, warn: () => {} },
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.pluginId).toBe(packageName);
+      expect(fs.existsSync(resolveTestPluginPackageDir(npmRoot, packageName))).toBe(true);
+    }
+  });
 
   it("accepts a trusted manifest-declared plugin id replacement during update", async () => {
     const npmRoot = path.join(suiteTempRootTracker.makeTempDir(), "npm");

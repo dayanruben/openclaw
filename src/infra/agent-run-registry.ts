@@ -21,8 +21,13 @@ type AgentRunContext = {
   /** Whether control UI clients should receive chat/agent updates for this run. */
   isControlUiVisible?: boolean;
   projectSessionActive?: boolean;
+  /** Whether hidden events may reach exact sessions.messages subscribers.
+   * Internal maintenance sharing a foreground key disables this to prevent selected-chat leaks. */
+  projectSessionMessages?: boolean;
   /** Whether lifecycle events may update the shared session row. */
   projectSessionLifecycle?: boolean;
+  /** Sticky diagnostic provenance only; never authorization for recovery work. */
+  mainSessionRestartRecovery?: true;
   /** Active cadence state by job; admission permits one invocation per job. */
   cronRunsByJobId?: Map<string, { pacingEnabled: boolean; nextCheckMs?: number }>;
   /** Timestamp when this context was first registered (for TTL-based cleanup). */
@@ -190,6 +195,12 @@ export function registerAgentRunContext(
   }
   if (context.projectSessionLifecycle !== undefined) {
     existing.projectSessionLifecycle = context.projectSessionLifecycle;
+  }
+  if (context.projectSessionMessages !== undefined) {
+    existing.projectSessionMessages = context.projectSessionMessages;
+  }
+  if (context.mainSessionRestartRecovery === true) {
+    existing.mainSessionRestartRecovery = true;
   }
   if (context.cronRunsByJobId !== undefined) {
     existing.cronRunsByJobId ??= new Map();

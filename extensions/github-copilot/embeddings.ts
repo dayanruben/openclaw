@@ -16,6 +16,7 @@ import { normalizeResolvedSecretInputString } from "openclaw/plugin-sdk/secret-i
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
 import { resolveFirstGithubToken } from "./auth.js";
 import { resolveGithubCopilotDomain } from "./domain.js";
+import { COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS } from "./models.js";
 import { CopilotRuntimeAuthError } from "./runtime-auth-error.js";
 import { DEFAULT_COPILOT_API_BASE_URL, resolveCopilotRuntimeAuth } from "./runtime-auth.js";
 import { COPILOT_RUNTIME_INTEGRATION_ID } from "./runtime-identity.js";
@@ -57,14 +58,10 @@ type CopilotModelEntry = {
 };
 
 type GitHubCopilotEmbeddingClient = {
-  githubToken: string;
   model: string;
-  runtimeAuth?: { apiKey: string; baseUrl: string };
-  baseUrl?: string;
-  headers?: Record<string, string>;
-  env?: NodeJS.ProcessEnv;
-  fetchImpl?: typeof fetch;
-  githubDomain?: string;
+  baseUrl: string;
+  headers: Record<string, string>;
+  fetchImpl: typeof fetch;
 };
 
 function isCopilotSetupError(err: unknown): boolean {
@@ -107,6 +104,7 @@ async function discoverEmbeddingModels(params: {
       },
     },
     policy: params.ssrfPolicy,
+    timeoutMs: COPILOT_MODELS_LIST_DEFAULT_TIMEOUT_MS,
     auditContext: "memory-remote",
   });
   try {
@@ -143,22 +141,29 @@ async function discoverEmbeddingModels(params: {
   }
 }
 
+function normalizeCopilotEmbeddingModel(model: string): string {
+  const normalized = model.trim();
+  const prefix = `${COPILOT_EMBEDDING_PROVIDER_ID}/`;
+  const stripped = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+  // Keep invalid selections explicit and normalization idempotent across
+  // cold memory options and direct provider creation.
+  return stripped && stripped === stripped.trim() && !stripped.startsWith(prefix)
+    ? stripped
+    : normalized;
+}
+
 function pickBestModel(available: string[], userModel?: string): string {
   if (userModel) {
-    const normalized = userModel.trim();
-    // Strip the provider prefix if users set "github-copilot/model-name".
-    const stripped = normalized.startsWith(`${COPILOT_EMBEDDING_PROVIDER_ID}/`)
-      ? normalized.slice(`${COPILOT_EMBEDDING_PROVIDER_ID}/`.length)
-      : normalized;
+    const normalized = normalizeCopilotEmbeddingModel(userModel);
     if (available.length === 0) {
       throw new Error("No embedding models available from GitHub Copilot");
     }
-    if (!available.includes(stripped)) {
+    if (!available.includes(normalized)) {
       throw new Error(
-        `GitHub Copilot embedding model "${stripped}" is not available. Available: ${available.join(", ")}`,
+        `GitHub Copilot embedding model "${normalized}" is not available. Available: ${available.join(", ")}`,
       );
     }
-    return stripped;
+    return normalized;
   }
   for (const preferred of PREFERRED_MODELS) {
     if (available.includes(preferred)) {
@@ -212,48 +217,23 @@ function parseGitHubCopilotEmbeddingPayload(payload: unknown, expectedCount: num
   return vectors as number[][];
 }
 
-async function resolveGitHubCopilotEmbeddingSession(client: GitHubCopilotEmbeddingClient): Promise<{
-  baseUrl: string;
-  headers: Record<string, string>;
-}> {
-  const auth =
-    client.runtimeAuth ??
-    (await resolveCopilotRuntimeAuth({
-      githubToken: client.githubToken,
-      env: client.env,
-      fetchImpl: client.fetchImpl,
-      githubDomain: client.githubDomain,
-    }));
-  const baseUrl = client.baseUrl?.trim() || auth.baseUrl || DEFAULT_COPILOT_API_BASE_URL;
-  return {
-    baseUrl,
-    headers: {
-      ...COPILOT_HEADERS_STATIC,
-      ...client.headers,
-      Authorization: `Bearer ${auth.apiKey}`,
-    },
-  };
-}
-
-async function createGitHubCopilotEmbeddingProvider(
+function createGitHubCopilotEmbeddingProvider(
   client: GitHubCopilotEmbeddingClient,
-): Promise<{ provider: MemoryEmbeddingProvider; client: GitHubCopilotEmbeddingClient }> {
-  const initialSession = await resolveGitHubCopilotEmbeddingSession(client);
-
-  const embed = async (input: string[], signal?: AbortSignal): Promise<number[][]> => {
+): MemoryEmbeddingProvider {
+  const embedMany = async (input: string[], signal?: AbortSignal): Promise<number[][]> => {
     if (input.length === 0) {
       return [];
     }
 
-    const url = `${initialSession.baseUrl.replace(/\/$/, "")}/embeddings`;
+    const url = `${client.baseUrl.replace(/\/$/, "")}/embeddings`;
     return await withRemoteHttpResponse({
       url,
       fetchImpl: client.fetchImpl,
-      ssrfPolicy: buildRemoteBaseUrlPolicy(initialSession.baseUrl),
+      ssrfPolicy: buildRemoteBaseUrlPolicy(client.baseUrl),
       signal,
       init: {
         method: "POST",
-        headers: initialSession.headers,
+        headers: client.headers,
         body: JSON.stringify({ model: client.model, input }),
       },
       onResponse: async (response) => {
@@ -273,18 +253,23 @@ async function createGitHubCopilotEmbeddingProvider(
   };
 
   return {
-    provider: {
-      id: COPILOT_EMBEDDING_PROVIDER_ID,
-      model: client.model,
-      embedQuery: async (text, options) => {
-        const [vector] = await embed([text], options?.signal);
-        return vector ?? [];
-      },
-      embedBatch: async (texts, options) => await embed(texts, options?.signal),
+    id: COPILOT_EMBEDDING_PROVIDER_ID,
+    model: client.model,
+    embed: async (input, options) => {
+      const [vector] = await embedMany(
+        [typeof input === "string" ? input : input.text],
+        options?.signal,
+      );
+      return vector ?? [];
     },
-    client: {
-      ...client,
-      baseUrl: initialSession.baseUrl,
+    embedBatch: async (inputs, options) => {
+      const texts = inputs.map((input) => (typeof input === "string" ? input : input.text));
+      if (options?.inputType === "query") {
+        return await Promise.all(
+          texts.map(async (text) => (await embedMany([text], options.signal))[0] ?? []),
+        );
+      }
+      return await embedMany(texts, options?.signal);
     },
   };
 }
@@ -293,6 +278,7 @@ export const githubCopilotMemoryEmbeddingProviderAdapter: MemoryEmbeddingProvide
   id: COPILOT_EMBEDDING_PROVIDER_ID,
   transport: "remote",
   authProviderId: COPILOT_EMBEDDING_PROVIDER_ID,
+  normalizeModel: ({ model }) => normalizeCopilotEmbeddingModel(model),
   autoSelectPriority: 15,
   allowExplicitWhenConfiguredAuto: true,
   shouldContinueAutoSelection: (err: unknown) => isCopilotSetupError(err),
@@ -312,21 +298,21 @@ export const githubCopilotMemoryEmbeddingProviderAdapter: MemoryEmbeddingProvide
           return { apiKey: explicitValue, baseUrl: customBaseUrl };
         })()
       : undefined;
-    const value = explicitValue
-      ? explicitValue
-      : (
-          await resolveFirstGithubToken({
-            agentDir: options.agentDir,
-            config: options.config,
-            env: process.env,
-          })
-        ).githubToken;
+    const profileAuth = explicitValue
+      ? undefined
+      : await resolveFirstGithubToken({
+          agentDir: options.agentDir,
+          config: options.config,
+          env: process.env,
+        });
+    const value = explicitValue ?? profileAuth?.githubToken;
     if (!value) {
       throw new Error("No GitHub token available for Copilot embedding provider");
     }
 
     const githubDomain = resolveGithubCopilotDomain({
       env: process.env,
+      explicit: profileAuth?.githubDomain,
       config: options.config,
     });
     // A custom endpoint owns its own explicit credential. Never resolve a
@@ -354,14 +340,14 @@ export const githubCopilotMemoryEmbeddingProviderAdapter: MemoryEmbeddingProvide
     const userModel = options.model?.trim() || undefined;
     const model = pickBestModel(availableModels, userModel);
 
-    const { provider } = await createGitHubCopilotEmbeddingProvider({
+    const provider = createGitHubCopilotEmbeddingProvider({
       baseUrl,
-      env: process.env,
       fetchImpl: fetch,
-      githubToken: value,
-      runtimeAuth,
-      githubDomain,
-      headers: options.remote?.headers,
+      headers: {
+        ...COPILOT_HEADERS_STATIC,
+        ...options.remote?.headers,
+        Authorization: `Bearer ${runtimeAuth.apiKey}`,
+      },
       model,
     });
 

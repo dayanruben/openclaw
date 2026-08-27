@@ -823,6 +823,7 @@ vi.mock("openclaw/plugin-sdk/reply-history", () => ({
 }));
 
 vi.mock("openclaw/plugin-sdk/reply-payload", () => ({
+  resolveAskUserQuestionOptionIndices: () => undefined,
   isReplyPayloadNonTerminalToolErrorWarning: () => false,
   buildTtsSupplementMediaPayload: (payload: {
     text?: string;
@@ -971,7 +972,8 @@ vi.mock("../config.runtime.js", () => ({
   updateLastRoute: updateLastRouteMock,
 }));
 
-vi.mock("../replies.js", () => ({
+vi.mock("../replies.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../replies.js")>()),
   createSlackReplyDeliveryPlan: () => ({
     peekThreadTs: () =>
       mockedReplyThreadTsSequence ? mockedReplyThreadTsSequence[0] : mockedReplyThreadTs,
