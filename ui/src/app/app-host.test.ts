@@ -782,24 +782,23 @@ describe("OpenClaw shell keyboard shortcuts", () => {
     }
   });
 
-  it("suppresses modal focus restoration when the navigation drawer closes without restoring focus", () => {
+  it("keeps focus in place when the navigation drawer closes without restoration", () => {
     const shell = document.createElement("openclaw-app-shell") as ShellNavDrawerCloseState;
-    const modal = document.createElement("openclaw-modal-dialog");
-    const setReturnFocusTarget = vi.fn();
-    modal.className = "drawer nav-drawer";
-    Object.defineProperty(modal, "setReturnFocusTarget", { value: setReturnFocusTarget });
-    shell.append(modal);
+    const trigger = document.body.appendChild(document.createElement("button"));
+    const restoreTriggerFocus = vi.spyOn(trigger, "focus");
     shell.navDrawerOpen = true;
-    shell.navDrawerTrigger = document.createElement("button");
+    shell.navDrawerTrigger = trigger;
 
     shell.closeNavDrawer();
 
-    expect(setReturnFocusTarget).toHaveBeenCalledExactlyOnceWith(null);
+    expect(restoreTriggerFocus).not.toHaveBeenCalled();
     expect(shell.navDrawerOpen).toBe(false);
     expect(shell.navDrawerTrigger).toBeNull();
+    trigger.remove();
   });
 
-  it("closes an open navigation drawer before moving its sidebar into desktop layout", () => {
+  it("closes an open navigation drawer before moving its sidebar into desktop layout", async () => {
+    await import("../components/app-sidebar.ts");
     vi.stubGlobal("matchMedia", () => ({ matches: false }));
     const shell = document.createElement("openclaw-app-shell") as ShellNavDrawerCloseState;
     const updateNavigation = vi.fn();
@@ -811,14 +810,11 @@ describe("OpenClaw shell keyboard shortcuts", () => {
         },
       } as unknown as ApplicationContext,
     };
-    const sidebar = document.createElement("openclaw-app-sidebar");
-    const dismissTransientMenus = vi.fn(() => true);
-    Object.defineProperty(sidebar, "dismissTransientMenus", { value: dismissTransientMenus });
-    const modal = document.createElement("openclaw-modal-dialog");
-    const setReturnFocusTarget = vi.fn();
-    modal.className = "drawer nav-drawer";
-    Object.defineProperty(modal, "setReturnFocusTarget", { value: setReturnFocusTarget });
-    shell.append(sidebar, modal);
+    const sidebar = document.createElement("openclaw-app-sidebar") as HTMLElement & {
+      dismissTransientMenus: () => boolean;
+    };
+    const dismissTransientMenus = vi.spyOn(sidebar, "dismissTransientMenus").mockReturnValue(true);
+    shell.append(sidebar);
     const trigger = document.body.appendChild(document.createElement("button"));
     const restoreTriggerFocus = vi.spyOn(trigger, "focus");
     const closeNavDrawer = vi.spyOn(shell, "closeNavDrawer");
@@ -829,7 +825,6 @@ describe("OpenClaw shell keyboard shortcuts", () => {
 
     expect(closeNavDrawer).toHaveBeenCalledExactlyOnceWith({ restoreFocus: false });
     expect(dismissTransientMenus).toHaveBeenCalledOnce();
-    expect(setReturnFocusTarget).toHaveBeenCalledExactlyOnceWith(null);
     expect(restoreTriggerFocus).not.toHaveBeenCalled();
     expect(shell.navDrawerOpen).toBe(false);
     expect(shell.navDrawerTrigger).toBeNull();

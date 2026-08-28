@@ -531,7 +531,7 @@ export function runAgentAttempt(params: {
     stream: string;
     data?: Record<string, unknown>;
     sessionKey?: string;
-  }) => void;
+  }) => void | Promise<void>;
   deferTerminalLifecycle?: boolean;
   authProfileProvider: string;
   sessionStore?: Record<string, SessionEntry>;
@@ -549,7 +549,18 @@ export function runAgentAttempt(params: {
   onUserMessagePersisted?: (message: Extract<AgentMessage, { role: "user" }>) => void;
   onContextEngineTurnCandidate?: (facts: ContextEngineTurnAttemptFacts) => void;
   onLifecycleGenerationChanged?: (lifecycleGeneration: string) => void;
+  onSuccessfulAuthProfile?: (selection: {
+    authProfileId?: string;
+    authProfileIdSource?: "auto" | "user";
+  }) => void;
 }) {
+  const onRuntimeActivity = (info: { phase: string }) => {
+    // CLI preparation and child launch do not prove a native turn. Parsed
+    // assistant/tool activity does, even when the backend omits lifecycle events.
+    if (info.phase === "assistant_output_started" || info.phase === "tool_execution_started") {
+      void params.onAgentEvent({ stream: "lifecycle", data: { phase: "start" } });
+    }
+  };
   const sessionAuthProfileId = params.sessionEntry?.authProfileOverride?.trim();
   const sessionAuthProfileSource = resolveSessionAuthProfileOverrideSource(params.sessionEntry);
   // An explicit session choice owns the conversation. Otherwise the profile
@@ -948,6 +959,7 @@ export function runAgentAttempt(params: {
             runId: params.runId,
             lifecycleGeneration: params.lifecycleGeneration,
             onExecutionStarted: params.opts.onExecutionStarted,
+            onExecutionPhase: onRuntimeActivity,
             lane: params.opts.lane,
             extraSystemPrompt: params.opts.extraSystemPrompt,
             inputProvenance: params.opts.inputProvenance,
@@ -1255,12 +1267,24 @@ export function runAgentAttempt(params: {
     disableTools,
     allowEmptyAssistantReplyAsSilent: isSubagentLane || isSubagentAnnounceHandoff,
     onAgentEvent: params.onAgentEvent,
+    onExecutionPhase: onRuntimeActivity,
     deferTerminalLifecycle: params.deferTerminalLifecycle,
     suppressNextUserMessagePersistence: params.suppressPromptPersistenceOnRetry === true,
     userTurnTranscriptRecorder: params.userTurnTranscriptRecorder,
     contextEngineLogicalTurnLease: params.contextEngineLogicalTurnLease,
     onContextEngineTurnCandidate: params.onContextEngineTurnCandidate,
     onUserMessagePersisted: params.onUserMessagePersisted,
+    onSuccessfulAuthProfile: params.onSuccessfulAuthProfile
+      ? (successfulProfileId) =>
+          params.onSuccessfulAuthProfile?.({
+            authProfileId: successfulProfileId,
+            authProfileIdSource: successfulProfileId
+              ? successfulProfileId === authProfileId
+                ? harnessAuthSelection.authProfileIdSource
+                : "auto"
+              : undefined,
+          })
+      : undefined,
     onExecutionStarted: (info) => {
       params.opts.onExecutionStarted?.();
       if (info?.lifecycleGeneration) {

@@ -15,6 +15,7 @@ import { getCurrentActiveNodeContext, setActiveNodeContext } from "../infra/acti
 import { onDiagnosticEvent, resetDiagnosticEventsForTest } from "../infra/diagnostic-events.js";
 import {
   NODE_MCP_TOOLS_CALL_COMMAND,
+  NODE_WORKER_ENVIRONMENT_STOP_COMMAND,
   NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND,
   NODE_WORKER_PRIVATE_COMMANDS,
   NODE_WORKER_SUPERVISOR_STATUS_COMMAND,
@@ -27,8 +28,8 @@ import { createDiagnosticLogRecordCapture } from "../logging/test-helpers/diagno
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { listConnectedNodePluginTools } from "./node-plugin-tool-snapshot.js";
 import {
+  collectNodeCatalogRuntimeState,
   createNodeRegistryRuntime,
-  isNodeRunnerSessionHost,
   setNodeRunnerStateChangedListener,
   updateNodeRunnerInventory,
 } from "./node-registry-private.js";
@@ -450,12 +451,9 @@ describe("gateway/node-registry", () => {
     ]);
     expect(nodeRegistry.get("node-1")).not.toHaveProperty("protocolFeatures");
     expect(
-      isNodeRunnerSessionHost({
-        registry: nodeRegistry,
-        nodeId: "node-1",
-        connId: "conn-1",
-        pairingGeneration: "generation-a",
-      }),
+      collectNodeCatalogRuntimeState(nodeRegistry, [
+        { nodeId: "node-1", connId: "conn-1", pairingGeneration: "generation-a" },
+      ]).sessionHostNodeIds.has("node-1"),
     ).toBe(true);
 
     currentGeneration = "generation-b";
@@ -473,12 +471,9 @@ describe("gateway/node-registry", () => {
     ).not.toBeNull();
     await expect(nodeWorkerSupervisorTransport.listCurrentNodes()).resolves.toEqual([]);
     expect(
-      isNodeRunnerSessionHost({
-        registry: nodeRegistry,
-        nodeId: "node-1",
-        connId: "conn-1",
-        pairingGeneration: "generation-b",
-      }),
+      collectNodeCatalogRuntimeState(nodeRegistry, [
+        { nodeId: "node-1", connId: "conn-1", pairingGeneration: "generation-b" },
+      ]).sessionHostNodeIds.has("node-1"),
     ).toBe(false);
     expect(
       updateNodeRunnerInventory({
@@ -751,7 +746,7 @@ describe("gateway/node-registry", () => {
     });
   });
 
-  it("keeps status proof current across capacity changes while fencing launches", async () => {
+  it("keeps capacity admission separate from negotiated environment turn reuse", async () => {
     const frames: string[] = [];
     const { nodeRegistry, nodeWorkerSupervisorTransport } = createPrivateNodeRegistryRuntime();
     registerNodeSession(
@@ -789,13 +784,26 @@ describe("gateway/node-registry", () => {
       }),
     ).toEqual({ changed: true });
     expect(
-      isNodeRunnerSessionHost({
-        registry: nodeRegistry,
-        nodeId: "node-1",
-        connId: "conn-1",
-        pairingGeneration: "generation-a",
-      }),
+      collectNodeCatalogRuntimeState(nodeRegistry, [
+        { nodeId: "node-1", connId: "conn-1", pairingGeneration: "generation-a" },
+      ]).sessionHostNodeIds.has("node-1"),
     ).toBe(true);
+
+    // Catalog host consent uses the supplied generation; capacity still describes
+    // the current connection, including a full host with zero available slots.
+    const snapshot = collectNodeCatalogRuntimeState(nodeRegistry, [
+      { nodeId: "node-1", connId: "conn-1", pairingGeneration: "stale-generation" },
+    ]);
+    expect(snapshot.sessionHostNodeIds.has("node-1")).toBe(false);
+    expect(snapshot.workerSlotsByNodeId.get("node-1")).toEqual({ total: 2, available: 0 });
+    const projectedCapacity = snapshot.workerSlotsByNodeId.get("node-1");
+    if (!projectedCapacity) {
+      throw new Error("expected projected capacity");
+    }
+    // JavaScript consumers can mutate a readonly-typed snapshot without changing admission.
+    Object.assign(projectedCapacity, { available: 2 });
+    expect(nodeWorkerSupervisorTransport.isCurrent(proof, true)).toBe(false);
+    expect(frames).toEqual([]);
 
     const workspaceInvoke = nodeWorkerSupervisorTransport.invoke({
       node: proof,
@@ -825,6 +833,37 @@ describe("gateway/node-registry", () => {
       ok: false,
       error: { code: "PRIVATE_DIALECT_UNAVAILABLE" },
     });
+
+    updateNodeRunnerInventory({
+      registry: nodeRegistry,
+      nodeId: "node-1",
+      connId: "conn-1",
+      declaration: {
+        protocolFeatures: [NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE],
+        workerHost: { enabled: true, capacity: { total: 2, available: 0 }, environmentSession: 1 },
+      },
+    });
+    expect(nodeWorkerSupervisorTransport.isCurrent(proof, true)).toBe(false);
+    for (const command of [
+      NODE_WORKER_SUPERVISOR_LAUNCH_COMMAND,
+      NODE_WORKER_ENVIRONMENT_STOP_COMMAND,
+    ] as const) {
+      const invocation = nodeWorkerSupervisorTransport.invoke({
+        node: proof,
+        command,
+        isDispatchAuthorized: () => true,
+      });
+      await vi.waitFor(() => expect(frames.at(-1)).toContain(command));
+      const dispatched = JSON.parse(frames.at(-1) ?? "{}") as { payload: { id: string } };
+      nodeRegistry.handleInvokeResult({
+        id: dispatched.payload.id,
+        nodeId: "node-1",
+        connId: "conn-1",
+        ok: true,
+        payloadJSON: "null",
+      });
+      await expect(invocation).resolves.toMatchObject({ ok: true });
+    }
   });
 
   it("fences retained proofs when runner consent is disabled", async () => {

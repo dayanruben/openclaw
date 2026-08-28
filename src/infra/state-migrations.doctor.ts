@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { listAgentIds, tryResolveAmbientOwnerAgentId } from "../agents/agent-scope-config.js";
-import { resolveSharedMainAuthAgentDir } from "../agents/auth-profiles/shared-main-dir.js";
 import {
   discardLegacyRegistryWorktrees,
   hasLegacyRegistryWorktrees,
@@ -201,6 +200,8 @@ function describeStateSchemaMigration(migration: OpenClawStateDatabaseSchemaMigr
       return "retired skill curator tables → removed tables and indexes";
     case "singleton-state-foldin-v12":
       return "singleton state tables → shared configuration state";
+    case "state-consolidation-v13":
+      return "cron jobs and subagent runs → canonical JSON storage";
     case "operator-approvals-system-agent":
       return "operator approvals → OpenClaw system changes";
     case "session-watch-cursor-provenance-v4":
@@ -535,13 +536,12 @@ export async function detectLegacyStateMigrations(params: {
   const managedOutgoingImages = detectDoctorOwnedState(detectLegacyManagedOutgoingImages);
   const apns = detectDoctorOwnedState(detectLegacyApnsRegistrations);
   const deviceAuth = detectDoctorOwnedState(detectLegacyDeviceAuth);
-  const sharedAuthStore =
-    stateSchemaMigrations.length === 0
-      ? detectDoctorOwnedState(detectSharedAuthStoreMigration)
-      : {
-          sourcePath: path.join(resolveSharedMainAuthAgentDir(env), "openclaw-agent.sqlite"),
-          hasLegacy: false,
-        };
+  const sharedAuthStore = detectSharedAuthStoreMigration({
+    stateDir,
+    env,
+    doctorOnlyStateMigrations:
+      stateSchemaMigrations.length === 0 && params.doctorOnlyStateMigrations === true,
+  });
   const deviceIdentity = detectLegacyDeviceIdentity({
     stateDir,
     env,

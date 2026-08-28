@@ -718,17 +718,24 @@ export default definePluginEntry({
         return {
           apiKey: auth.apiKey,
           baseUrl: auth.baseUrl,
-          request: { headers: buildCopilotRuntimeHeaders() },
+          request: {
+            headers: buildCopilotRuntimeHeaders({ config: ctx.config, headers: ctx.model.headers }),
+          },
         };
       },
       resolveUsageAuth: async (ctx) => await ctx.resolveOAuthToken(),
       fetchUsageSnapshot: async (ctx) => {
+        const source = parseGithubCopilotApiKey(ctx.token);
         const { fetchCopilotUsage } = await loadGithubCopilotRuntime();
         return await fetchCopilotUsage(
-          ctx.token,
+          source.githubToken,
           ctx.timeoutMs,
           ctx.fetchFn,
-          resolveGithubCopilotDomain({ env: ctx.env, config: ctx.config }),
+          resolveGithubCopilotDomain({
+            env: ctx.env,
+            explicit: source.githubDomain,
+            config: ctx.config,
+          }),
         );
       },
     });

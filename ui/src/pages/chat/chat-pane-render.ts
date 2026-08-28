@@ -60,6 +60,7 @@ import { createLinkFaviconFetcher } from "./link-favicon-loader.ts";
 import { activeQueuedMessageEdit } from "./queued-message-edit.ts";
 import { hasAbortableSessionRun } from "./run-lifecycle.ts";
 import { scheduleChatScroll } from "./scroll.ts";
+import { maybeResetToolStream } from "./stream-reconciliation.ts";
 import { resolveActiveRunOutputTokens, resolveChatProjectionRunId } from "./tool-stream.ts";
 import { configureToolTitleFetcher } from "./tool-titles.ts";
 import { workspaceResultConflictFromPlacement } from "./workspace-conflict.ts";
@@ -266,7 +267,6 @@ export class ChatPane extends ChatPaneLayoutRender {
       hasLocalRun: () => Boolean(state.chatRunId),
       sessionParticipationBlocked,
       onDenied: (reason) => this.publishHeaderError(reason),
-      onCompact: () => void state.handleSendChat("/compact"),
       onAbort: () => void state.handleAbortChat({ preserveDraft: true }),
       onRewind: (entryId) => this.rewindToMessage(entryId),
       onFork: (entryId) => this.forkFromMessage(entryId),
@@ -525,7 +525,7 @@ export class ChatPane extends ChatPaneLayoutRender {
           void this.loadCatalogSession(catalogKey, false);
           return;
         }
-        state.resetToolStream();
+        maybeResetToolStream(state, { preserveStreamSegments: state.chatRunId !== null });
         this.reconcileWaitingApprovalSnapshot();
         void refreshPageChat(state, { awaitHistory: true, scheduleScroll: false });
       },
@@ -567,7 +567,6 @@ export class ChatPane extends ChatPaneLayoutRender {
                 followUpModeOverride ? { followUpMode: followUpModeOverride } : undefined,
                 submissionAction,
               ),
-      onCompact: sessionActionCallbacks.onCompact,
       // Checkpoint deep-link carries the archived filter so the row stays findable.
       onOpenSessionCheckpoints: () => {
         const status = selectedSessionArchived ? "&status=archived" : "";
