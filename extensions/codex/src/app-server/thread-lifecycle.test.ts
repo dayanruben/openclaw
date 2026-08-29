@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams } from "openclaw/plugin-sdk/agent-harness-runtime";
-import { GPT5_BEHAVIOR_CONTRACT as CODEX_GPT5_BEHAVIOR_CONTRACT } from "openclaw/plugin-sdk/provider-model-shared";
+import {
+  GPT5_BEHAVIOR_CONTRACT as CODEX_GPT5_BEHAVIOR_CONTRACT,
+  type ModelCompatConfig,
+} from "openclaw/plugin-sdk/provider-model-shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { codexCatalogHomeId } from "../session-catalog-home-id.js";
 import { resolveCodexAppServerHomeDir } from "./auth-start-options.js";
@@ -1716,7 +1719,12 @@ describe("Codex app-server native code mode config", () => {
 
   it("does not overwrite native supervised turn settings", () => {
     const params = createAttemptParams({ provider: "anthropic" });
-    params.thinkLevel = "high";
+    params.thinkLevel = "off";
+    const compat: ModelCompatConfig = { supportedReasoningEfforts: ["none", "high"] };
+    params.model = {
+      ...createCodexTestModel("anthropic"),
+      compat,
+    };
     const request = buildTurnStartParams(params, {
       threadId: "thread-supervised",
       cwd: "/repo",
@@ -2015,32 +2023,114 @@ describe("Codex app-server native code mode config", () => {
 });
 
 describe("Codex app-server turn input image sanitizing", () => {
-  it("carries native workspace temporary-root overrides into turn policy", () => {
-    const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
-      threadId: "thread-1",
-      cwd: "/tmp/qa/workspace",
-      appServer: {
-        ...createAppServerOptions(),
-        start: {
-          args: [
-            "app-server",
-            "-c",
-            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-            "-c",
-            "sandbox_workspace_write.exclude_slash_tmp=true",
-          ],
-        },
-      } as never,
-    });
+  const excludedTmpStart = {
+    args: [
+      "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+      "-csandbox_workspace_write.exclude_slash_tmp=true",
+      "app-server",
+    ],
+  };
 
-    expect(request.sandboxPolicy).toEqual({
-      type: "workspaceWrite",
-      writableRoots: ["/tmp/qa/workspace"],
-      networkAccess: false,
-      excludeTmpdirEnvVar: true,
-      excludeSlashTmp: true,
-    });
-  });
+  it.each([
+    {
+      name: "separate",
+      args: [
+        "-c",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "attached short",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "-c=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "mixed last true",
+      args: [
+        "--config=sandbox_workspace_write.exclude_tmpdir_env_var=false",
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: true,
+    },
+    {
+      name: "mixed last false",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+        "-c=sandbox_workspace_write.exclude_slash_tmp=false",
+      ],
+      excluded: false,
+    },
+    {
+      name: "commented true across separate and attached forms",
+      args: [
+        "-c",
+        "sandbox_workspace_write.exclude_tmpdir_env_var = false # earlier",
+        "--config=sandbox_workspace_write.exclude_tmpdir_env_var = true # exclusion retained",
+        "--config",
+        "sandbox_workspace_write.exclude_slash_tmp = false # earlier",
+        "-c=sandbox_workspace_write.exclude_slash_tmp = true # exclusion retained",
+      ],
+      excluded: true,
+    },
+    {
+      name: "commented false wins last",
+      args: [
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--config",
+        "sandbox_workspace_write.exclude_tmpdir_env_var=false # explicit last value",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+        "-csandbox_workspace_write.exclude_slash_tmp=false # explicit last value",
+      ],
+      excluded: false,
+    },
+    {
+      name: "quoted booleans remain strings",
+      args: [
+        '-csandbox_workspace_write.exclude_tmpdir_env_var="true" # not a boolean',
+        "--config=sandbox_workspace_write.exclude_slash_tmp='true' # not a boolean",
+      ],
+      excluded: false,
+    },
+    {
+      name: "option value and terminator",
+      args: [
+        "--ws-issuer",
+        "-csandbox_workspace_write.exclude_tmpdir_env_var=true",
+        "--",
+        "--config=sandbox_workspace_write.exclude_slash_tmp=true",
+      ],
+      excluded: false,
+    },
+  ])(
+    "carries native workspace temporary-root overrides into turn policy: $name",
+    ({ args, excluded }) => {
+      const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
+        threadId: "thread-1",
+        cwd: "/tmp/qa/workspace",
+        appServer: {
+          ...createAppServerOptions(),
+          start: { args: ["app-server", ...args] },
+        } as never,
+      });
+      expect(request.sandboxPolicy).toEqual({
+        type: "workspaceWrite",
+        writableRoots: ["/tmp/qa/workspace"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: excluded,
+        excludeSlashTmp: excluded,
+      });
+    },
+  );
 
   it("preserves implicit temporary writable roots for ordinary Codex turns", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
@@ -2062,7 +2152,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createAppServerOptions() as never,
+      appServer: {
+        ...createAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
       sandboxPolicy: {
         type: "workspaceWrite",
         writableRoots: ["/repo"],
@@ -2085,7 +2178,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createNetworkProxyAppServerOptions() as never,
+      appServer: {
+        ...createNetworkProxyAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
     });
 
     expect(request).not.toHaveProperty("permissions");
@@ -2096,7 +2192,10 @@ describe("Codex app-server turn input image sanitizing", () => {
     const request = buildTurnStartParams(createAttemptParams({ provider: "openai" }), {
       threadId: "thread-1",
       cwd: "/repo",
-      appServer: createNetworkProxyAppServerOptions() as never,
+      appServer: {
+        ...createNetworkProxyAppServerOptions(),
+        start: excludedTmpStart,
+      } as never,
       sandboxPolicy: {
         type: "externalSandbox",
         networkAccess: "enabled",
@@ -5218,6 +5317,8 @@ describe("resolveReasoningEffort (#71946)", () => {
     { requested: "max", supported: maxEfforts, expected: "max" },
     { requested: "ultra", supported: maxEfforts, expected: "max" },
     { requested: "ultra", supported: ultraEfforts, expected: "ultra" },
+    { requested: "high", supported: ["none", "max"], expected: "max" },
+    { requested: "high", supported: ["none"], expected: null },
   ] as const)(
     "maps $requested to $expected using provider-supported efforts",
     ({ requested, supported, expected }) => {
@@ -5237,6 +5338,9 @@ describe("resolveReasoningEffort (#71946)", () => {
   it("omits non-effort think levels", () => {
     expect(resolveReasoningEffort("off", "catalog-model", ultraEfforts)).toBeNull();
     expect(resolveReasoningEffort("adaptive", "catalog-model", ultraEfforts)).toBeNull();
+    expect(
+      resolveReasoningEffort("adaptive", "catalog-model", ["none", ...ultraEfforts]),
+    ).toBeNull();
   });
 });
 
