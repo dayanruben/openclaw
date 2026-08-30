@@ -999,6 +999,7 @@ export async function performGatewaySessionReset(params: {
       agentId: string;
       storePath: string;
       incognitoDeleted: true;
+      deletedSessionId?: string;
     }
   | { ok: false; error: ReturnType<typeof errorShape> }
 > {
@@ -1508,6 +1509,7 @@ export async function performGatewaySessionReset(params: {
           agentId: target.agentId,
           storePath,
           incognitoDeleted: true,
+          deletedSessionId: deleted.deletedSessionId,
         };
       }
 
@@ -1625,8 +1627,6 @@ export async function performGatewaySessionReset(params: {
               : params.clearExecBinding
                 ? undefined
                 : currentEntry?.execHost,
-            execSecurity: currentEntry?.execSecurity,
-            execAsk: currentEntry?.execAsk,
             execNode: nextExecNode,
             execCwd: params.execNode
               ? params.execCwd

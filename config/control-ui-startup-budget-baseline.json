@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 344714,
-  "reason": "Revert queued-send transcript bubbles (#131909) per operator live review; fresh pnpm ui:build measures 344714 B. Retain the 512 B growth allowance, 64 B build variance, and 350 KiB baseline ceiling.",
+  "startupJsGzipBytes": 346185,
+  "reason": "Per-session colors in the boot path (#132570): sidebar stripe render, color tokens, and menu wiring measured 346185 B, +579 B over the prior baseline and 3 B past its growth allowance; below the maintainer-approved 347323 B ceiling; hard cap and allowances unchanged",
   "updatedAt": "2026-08-29"
 }
