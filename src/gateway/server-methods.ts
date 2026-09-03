@@ -61,10 +61,8 @@ import type {
   GatewayRequestOptions,
   SessionMutationAuthorization,
 } from "./server-methods/types.js";
-import {
-  resolveDirectIncognitoTargets,
-  sessionMutationTargetFields,
-} from "./session-sharing-target-input.js";
+import { sessionMutationTargetFields } from "./session-method-policy.js";
+import { resolveDirectIncognitoTargets } from "./session-sharing-target-input.js";
 import {
   resolveSessionMutationAuthorization,
   SessionMutationAuthorizationChangedError,
@@ -124,6 +122,8 @@ const CORE_GATEWAY_HANDLER_MODULES = {
   "memory-search": () =>
     import("./server-methods/memory-search.js").then((module) => module.memorySearchHandlers),
   terminal: () => import("./server-methods/terminal.js").then((module) => module.terminalHandlers),
+  transcripts: () =>
+    import("./server-methods/transcripts.js").then((module) => module.transcriptsHandlers),
   "ui-command": () =>
     import("./server-methods/ui-command.js").then((module) => module.uiCommandHandlers),
   "models-auth-status": () =>
@@ -175,6 +175,8 @@ const CORE_GATEWAY_HANDLER_MODULES = {
     ),
   "sessions-create": () =>
     import("./server-methods/sessions-create.js").then((module) => module.sessionCreateHandlers),
+  "sessions-title": () =>
+    import("./server-methods/sessions-title.js").then((module) => module.sessionTitleHandlers),
   "sessions-recover": () =>
     import("./server-methods/sessions-recover.js").then((module) => module.sessionRecoverHandlers),
   "sessions-delete": () =>
@@ -306,10 +308,6 @@ const SUSPEND_CONTROL_METHODS = new Set([
   "gateway.suspend.status",
   "gateway.suspend.resume",
 ]);
-
-function isGatewayMethodAllowedDuringSuspension(method: string): boolean {
-  return SUSPEND_CONTROL_METHODS.has(method);
-}
 
 function runGatewayPendingWorkContinuation<T>(params: {
   method: string;
@@ -606,7 +604,7 @@ export async function runWithGatewayRequestEnvelope<T>(
       }),
     );
   }
-  if (!rootWorkAdmission && !isGatewayMethodAllowedDuringSuspension(method)) {
+  if (!rootWorkAdmission && !SUSPEND_CONTROL_METHODS.has(method)) {
     const restartDraining = isGatewayRestartDraining();
     return await options.reject(
       errorShape(

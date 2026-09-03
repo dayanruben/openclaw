@@ -499,6 +499,15 @@ export const en: TranslationMap & {
     retry: "Retry",
     stylesFailed: "Styles failed to load, so the page may look broken.",
   },
+  communityInvite: {
+    cardLabel: "Join the OpenClaw community on Discord",
+    artAlt: "A lobster beside the Discord mark on a lit seafloor pedestal",
+    title: "Come build with us",
+    body: "Ask anything, show what you're making, and find out what everyone else is building.",
+    bodyGreeting: "Or just say hi.",
+    action: "Join us on Discord",
+    dismissForever: "Dismiss and don't show again",
+  },
   updates: {
     adminRequired: "Administrator access is required to change update settings or start an update.",
     campaign: {
@@ -916,10 +925,25 @@ export const en: TranslationMap & {
     draft: "Draft",
     draftDescription: "Keep this session to yourself until you publish it",
     messagePlaceholder: "What should this session work on?",
+    titlePreparationDisclosure:
+      "When you pause, draft text is sent to your title provider to prepare a session name. Not used in incognito.",
+    preparedTitle: "Session name: {title}",
     dictate: "Dictate",
     readingAttachment: "Reading attachment",
     start: "Start session",
     startInTerminal: "Start in terminal",
+    nativeTerminalHint:
+      "Start the native CLI on the selected machine using its own account and configuration. This does not create an OpenClaw Chat.",
+    chooseNativeHost: "Choose a native CLI host",
+    nativeTerminalPrompt: "Optional initial prompt for the native CLI",
+    terminalNodeFolder: "Existing absolute folder on this node",
+    terminalHostUnavailable:
+      "Native CLI host unavailable. Check that the CLI is installed and the node is connected with its fresh-start command approved, then retry the catalog.",
+    terminalDisabled: "Enable CLI agents and terminals in Gateway settings to start a native CLI.",
+    terminalAttachmentsUnsupported:
+      "Remove attachments before starting a native CLI. Add files from the terminal after it opens.",
+    terminalPlacementUnsupported:
+      "Native CLI sessions use a specific host, not OpenClaw worker placement. Reset this draft and choose a native host.",
     starting: "Starting…",
     createFailed: "Couldn't create the session.",
     createOutcomeUnknown:
@@ -981,10 +1005,19 @@ export const en: TranslationMap & {
     createdBy: "Created by {name}",
     ownedBy: "Owned by {name}",
     archivedBy: "Archived by {name}",
+    archiveReason: "Archive reason",
+    archiveReasonManual: "Archived manually",
+    archiveReasonActiveSessionCap:
+      "Automatically archived because the active-session limit was reached",
+    archiveReasonStaleDashboard: "Automatically archived after dashboard inactivity",
+    archiveReasonRestartRecovery: "Archived when a replacement session was recovered",
     viewingNow: "viewing now",
     owners: "Owners",
     allOwners: "All owners",
     involvingMe: "Involving me",
+    specificOwner: "Specific owner",
+    specificOwnerAvailable: "Specific owner: {count} available",
+    specificOwnerSelected: "Specific owner: {name}",
     ownerYou: "{name} (You)",
     withParticipant: "with {name}",
     withMoreParticipants: "+{count} more",
@@ -1225,7 +1258,7 @@ export const en: TranslationMap & {
     groupByDate: "Date",
     group: "Group",
     ungrouped: "Ungrouped",
-    newGroup: "New group…",
+    newGroup: "New group",
     newGroupPrompt: "New group name",
     newGroupTitle: "New group",
     newGroupCreate: "Create group",
@@ -1240,7 +1273,7 @@ export const en: TranslationMap & {
     moveBackToGroups: "Move back to Groups",
     groupMenu: "Group options for {group}",
     newSessionInGroup: "New session in {group}",
-    groupDefaultsMenu: "New session defaults…",
+    groupDefaultsMenu: "New session defaults",
     groupDefaultsTitle: 'New session defaults for "{group}"',
     groupDefaultsDescription: "Choose where new sessions in this group start.",
     groupDefaultsCwd: "Working directory",
@@ -1252,10 +1285,10 @@ export const en: TranslationMap & {
     groupDefaultsWorktreeHint: "Runs each session in an isolated Git worktree.",
     groupDefaultsFailed: "Could not save the group defaults.",
     groupDefaultsStale: "Gateway connection replaced before the defaults were saved. Try again.",
-    renameGroupMenu: "Rename group…",
+    renameGroupMenu: "Rename group",
     renameGroupTitle: 'Rename group "{group}"',
     groupNameLabel: "Group name",
-    deleteGroupMenu: "Delete group…",
+    deleteGroupMenu: "Delete group",
     deleteGroupTitle: 'Delete group "{group}"',
     deleteGroupConfirm: "The group is removed. Its sessions move back to the session list.",
     deleteGroupStale: 'Gateway connection replaced before "{group}" was deleted. Try again.',
@@ -2291,6 +2324,7 @@ export const en: TranslationMap & {
   tabs: {
     agents: "Agents",
     activity: "Activity",
+    meetings: "Meetings",
     apps: "Apps",
     portals: "Portals",
     approvals: "Approvals",
@@ -2334,6 +2368,7 @@ export const en: TranslationMap & {
   subtitles: {
     agents: "Workspaces, tools, identities.",
     activity: "Recent sessions across people using this gateway.",
+    meetings: "Meeting notes and transcripts across this gateway.",
     apps: "Companion apps for phone, watch, desktop, and browser.",
     portals: "Live previews from agent-run applications.",
     approvals: "Recent exec, plugin, and system-agent approvals.",
@@ -3895,7 +3930,7 @@ export const en: TranslationMap & {
       noOtherTabs: "No other tabs",
       resize: "Resize",
       autoHeight: "Auto height",
-      remove: "Remove",
+      remove: "Delete",
       needsApproval: "Needs approval",
       needsApprovalDetail: "This widget requested additional access.",
       networkAccess: "Network origins",
@@ -4164,6 +4199,8 @@ export const en: TranslationMap & {
     queuedCount: "{count} queued",
     reconnecting: "Reconnecting…",
     restarting: "Restarting…",
+    suspending: "Suspending…",
+    suspended: "Suspended",
     retryNow: "Retry now",
     actionsUnavailable: "Actions are unavailable while the Gateway reconnects.",
     settingsChangesUnavailable:
@@ -5019,6 +5056,15 @@ export const en: TranslationMap & {
         stepAdmin:
           "If this continues, ask a Gateway administrator to check the identity provider and GitHub API credential.",
       },
+      verifiedUserRequired: {
+        title: "Verified identity required",
+        summary:
+          "This Gateway has named roles enabled. Device and setup tokens cannot identify a person.",
+        stepIdentity:
+          "Reconnect through the trusted proxy or Tailscale so the Gateway can verify your identity.",
+        stepSharedSecret:
+          "For trusted local operator access, use the shared Gateway token or password.",
+      },
       authRequired: {
         title: "Auth required",
         summary:
@@ -5039,6 +5085,16 @@ export const en: TranslationMap & {
           "Replace stale token/password values; do not reuse a token from another Gateway URL.",
         stepMode:
           "Use one matching auth mode at a time: gateway token for token mode, password for password mode.",
+      },
+      trustedProxy: {
+        title: "Proxy authentication required",
+        summary:
+          "The Gateway is reachable, but it rejected the proxy identity or forwarding information.",
+        stepSignIn:
+          "Open the configured authenticated proxy or SSO dashboard URL and sign in there, rather than visiting the Gateway directly.",
+        stepHeaders:
+          "Ask the Gateway administrator to check for missing identity headers and required-header forwarding on WebSocket upgrade requests, and confirm your account is permitted.",
+        stepNoToken: "A Gateway token cannot replace proxy authentication.",
       },
       rateLimited: {
         title: "Too many failed attempts",
@@ -5107,6 +5163,7 @@ export const en: TranslationMap & {
   chat: {
     cloudWorkerFailed: "Runner failed: {error}",
     errorDetails: "Error details",
+    details: "Details",
     copyError: "Copy error",
     diskSpace: {
       warningTitle: "Cloud session disk space is low",
@@ -5803,11 +5860,11 @@ export const en: TranslationMap & {
       fastMode: "Fast mode",
       searchModels: "Search models",
       noMatchingModels: "No models match your search",
-      onlyForSession: "Only for this session",
-      selectionTargetSession: "Selection target: This session only",
-      selectionTargetAgent: "Selection target: This agent's default",
-      selectionTargetGlobal: "Selection target: Global default",
-      useDefaultModel: "Use default ({model})",
+      selectionTargetSession: "This session",
+      selectionTargetAgent: "Agent default",
+      selectionTargetGlobal: "Global default",
+      resetSessionModel: "Reset session model",
+      useDefaultModel: "Use default ({model}) for this session",
       defaultWithModel: "Default ({model})",
       defaultWithLevel: "Default ({level})",
       fastHelp: "Faster responses, higher usage of limits.",
@@ -5829,12 +5886,12 @@ export const en: TranslationMap & {
     permissionControls: {
       label: "Permissions",
       help: "Choose permissions for this session.",
-      applying: "Applying permissions…",
       default: "Default",
       defaultDescription: "Follow the agent's configured policy.",
       defaultWithMode: "Default ({mode})",
       fullRequiresAdmin: "Full access requires operator.admin access.",
       updateFailed: "Failed to update permissions: {error}",
+      refreshFailed: "Permissions were saved, but refreshing the session failed: {error}",
       modes: {
         "read-only": {
           label: "Read Only",
@@ -5966,7 +6023,6 @@ export const en: TranslationMap & {
       noMatches: "No matching messages",
     },
     pendingInputs: {
-      queued: "Message received. Waiting for the agent to start it.",
       cancelled:
         "Cancelled before the agent started it. It will not run automatically; copy it and send again.",
       interrupted:
@@ -5980,6 +6036,7 @@ export const en: TranslationMap & {
       badge: "Expired",
     },
     composer: {
+      composerInput: "Chat composer",
       placeholder: "Message {name}",
       emptyHint: "Write a message to send.",
       placeholderWithAttachments: "Add a message or paste more images...",
