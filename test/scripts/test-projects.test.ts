@@ -635,7 +635,27 @@ describe("scripts/test-projects changed-target routing", () => {
         throw new Error(`Missing recovery test owner: ${file}`);
       }
       expect(plan.targets).toContain("test/scripts/upgrade-survivor-recovery-cleanup.test.ts");
+      if (file.endsWith("/run.sh")) {
+        expect(plan.targets).toContain("test/scripts/upgrade-survivor-watchos-direct-node.test.ts");
+      }
+      if (
+        file === "scripts/e2e/upgrade-survivor-docker.sh" ||
+        file === "scripts/e2e/lib/upgrade-survivor/run.sh"
+      ) {
+        expect(plan.targets).toContain("test/scripts/upgrade-survivor-mobile-pairing.test.ts");
+      }
     }
+    expectChangedTargets(
+      ["scripts/e2e/lib/upgrade-survivor/mobile-pairing-client.mts"],
+      ["test/scripts/upgrade-survivor-mobile-pairing.test.ts"],
+    );
+  });
+
+  it("routes the watchOS survivor adapter to its contract test", () => {
+    expectChangedTargets(
+      ["scripts/e2e/lib/upgrade-survivor/watchos-direct-node.mjs"],
+      ["test/scripts/upgrade-survivor-watchos-direct-node.test.ts"],
+    );
   });
 
   it("keeps force-test runner edits on its safe CLI tests", () => {
@@ -881,7 +901,6 @@ describe("scripts/test-projects changed-target routing", () => {
         "test/scripts/package-acceptance-workflow.test.ts",
         "test/scripts/pr-crabbox-merge-bypass.test.ts",
         "test/scripts/release-tooling-identity.test.ts",
-        "test/scripts/run-additional-boundary-checks.test.ts",
         "test/scripts/validate-release-publish-approval.test.ts",
       ],
     );
@@ -1433,6 +1452,7 @@ describe("scripts/test-projects changed-target routing", () => {
   it("routes shared contract ownership and declarations through every affected lane", () => {
     const targets = [
       "test/scripts/test-projects.test.ts",
+      "test/vitest-projects-config.test.ts",
       "test/vitest/vitest.contracts-channel-surface.config.ts",
       "test/vitest/vitest.contracts-channel-config.config.ts",
       "test/vitest/vitest.contracts-channel-registry.config.ts",
@@ -3407,8 +3427,10 @@ describe("scripts/test-projects changed-target routing", () => {
       "ui/src/components/form-controls.browser.test.ts",
     );
     if (targets.length === 1) {
+      // Browser screenshots live in directories named after their test files.
+      const matchingFiles = fs.globSync(targets[0]!).filter((file) => fs.statSync(file).isFile());
       expect(plans.flatMap((plan) => plan.includePatterns ?? []).toSorted()).toEqual(
-        fs.globSync(targets[0]!).toSorted(),
+        matchingFiles.toSorted(),
       );
     }
   });
@@ -4880,6 +4902,8 @@ it.each([
   "test/scripts/ci-linux-git.test.ts",
   "test/scripts/ci-platform-checkout.test.ts",
   "test/scripts/fixtures/ci-platform-checkout.mjs",
+  "test/scripts/ci-windows-process-census.test-support.ts",
+  "test/scripts/fixtures/ci-windows-process-census.mjs",
   "test/scripts/fixtures/ci-windows-process-census.py",
 ])("routes shared Git ownership through all native tooling lanes: %s", (changedPath) => {
   const plan = resolveChangedTestTargetPlan([changedPath]);
@@ -4905,6 +4929,8 @@ it.each([
   "test/scripts/openclaw-performance-git-lifecycle.test.ts",
   "test/scripts/ci-git-owner.test-support.ts",
   "test/scripts/fixtures/ci-platform-checkout.mjs",
+  "test/scripts/ci-windows-process-census.test-support.ts",
+  "test/scripts/fixtures/ci-windows-process-census.mjs",
   "test/scripts/fixtures/ci-windows-process-census.py",
 ])("routes Performance lifecycle ownership: %s", (changedPath) => {
   expect(resolveChangedTestTargetPlan([changedPath]).targets).toEqual(

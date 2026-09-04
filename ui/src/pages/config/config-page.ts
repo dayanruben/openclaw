@@ -807,8 +807,10 @@ export class ConfigPage extends OpenClawLightDomElement {
       this.isConnected &&
       this.systemInfoGatewaySource === gatewaySource &&
       this.context.gateway.snapshot.client === client &&
-      this.context.agentSelection.state.selectedId === agentId;
-    const promise = loadModelCatalog(client, { agentId, preparedOnly: true })
+      this.context.agentSelection.state.selectedId === agentId &&
+      // Agent selection can cycle A -> B -> A while the first A load is still pending.
+      this.sessionObserverModelsRequest?.promise === promise;
+    const promise = loadModelCatalog(client, { agentId, preparedOnly: true, rejectOnFailure: true })
       .then(({ models }) => {
         if (isCurrent()) {
           this.sessionObserverModels = models;
@@ -1204,8 +1206,8 @@ export class ConfigPage extends OpenClawLightDomElement {
       themeModeProvenance: themeModePref.provenance,
       themeModeResetValue: themeModePref.resetValue ?? UI_APPEARANCE_DEFAULTS.themeMode,
       accent: this.settings.accent,
-      accentOverridden: accentPref.overridden,
       accentProvenance: accentPref.provenance,
+      accentResetValue: accentPref.resetValue,
       fontUi: this.settings.fontUi,
       fontChat: this.settings.fontChat,
       fontUiProvenance: this.currentSyncedPref("fontUi").provenance,
@@ -1449,14 +1451,16 @@ export class ConfigPage extends OpenClawLightDomElement {
       asConfigRecord(configState.configForm ?? configState.configSnapshot?.config) ?? {};
     const body = this.renderAdvancedConfig(configObject);
     return html`
-      ${this.pageId === "memory"
-        ? nothing
-        : html`
-            ${renderSettingsPageHeader({
-              title: configPageTitle(this.pageId),
-              subtitle: renderConfigPageSubtitle(this.pageId),
-            })}
-          `}
+      ${
+        this.pageId === "memory"
+          ? nothing
+          : html`
+              ${renderSettingsPageHeader({
+                title: configPageTitle(this.pageId),
+                subtitle: renderConfigPageSubtitle(this.pageId),
+              })}
+            `
+      }
       ${renderSettingsWorkspace(body)}
     `;
   }
