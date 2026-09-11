@@ -26,6 +26,7 @@ import {
   isChannelProgressDraftWorkToolName,
   mergeChannelProgressDraftLineForStreaming,
   normalizeChannelProgressDraftLineIdentity,
+  removeChannelProgressDraftLineForStreaming,
   resolveChannelProgressDraftLabel,
   resolveChannelProgressDraftMaxLineChars,
   resolveChannelProgressDraftMaxLines,
@@ -124,6 +125,7 @@ export function createChannelProgressDraftCompositor(params: {
     });
   let progressSuppressed = false;
   let lines: ChannelProgressDraftCompositorLine[] = [];
+  let renderGeneration = 0;
   let lastRenderedText = "";
   let lastRenderedLines = lines;
   let lastRenderedDiffStatKey = "";
@@ -224,6 +226,7 @@ export function createChannelProgressDraftCompositor(params: {
     clearPreambleExpiryTimer();
     progressSuppressed = suppressed;
     lines = [];
+    renderGeneration += 1;
     lastRenderedText = "";
     lastRenderedLines = lines;
     lastRenderedDiffStatKey = "";
@@ -253,17 +256,17 @@ export function createChannelProgressDraftCompositor(params: {
     if (!text || (text === lastRenderedText && !structuredStateChanged)) {
       return false;
     }
+    const generation = renderGeneration;
     const observed = await settleProgressVisibilityCallbackResult(
       params.update(text, { ...options, lines: [...lines], snapshot: getSnapshot() }),
     );
-    if (!observed.visible) {
-      return false;
+    // A retired publication can finish after its replacement; it no longer owns dedupe state.
+    if (observed.visible && generation === renderGeneration) {
+      lastRenderedText = text;
+      lastRenderedLines = lines;
+      lastRenderedDiffStatKey = diffStatKey;
     }
-    // Only accepted renders become the dedupe baseline; pending sends remain retryable.
-    lastRenderedText = text;
-    lastRenderedLines = lines;
-    lastRenderedDiffStatKey = diffStatKey;
-    return true;
+    return observed.visible;
   };
 
   const render = async (options?: { flush?: boolean }): Promise<boolean> => {
@@ -341,8 +344,10 @@ export function createChannelProgressDraftCompositor(params: {
       // Transports without deletion replace an existing preview with its neutral label.
       return lastRenderedText ? await publish() : false;
     }
-    await params.deleteCurrent();
+    // Release the retiring baseline before an identical replacement can publish.
+    renderGeneration += 1;
     lastRenderedText = "";
+    await params.deleteCurrent();
     return true;
   };
 
@@ -416,8 +421,8 @@ export function createChannelProgressDraftCompositor(params: {
           toolProgress: !quietProgress,
           maxLines: resolveChannelProgressDraftMaxLines(params.entry),
         })
-      : typeof line === "object" && line.id
-        ? removeChannelProgressDraftLine(lines, line.id)
+      : typeof progressLine === "object"
+        ? removeChannelProgressDraftLineForStreaming(lines, progressLine)
         : lines;
     const lineChanged = nextLines !== lines;
     const hasUnconfirmedRender = formatDraftText(nextLines) !== lastRenderedText;

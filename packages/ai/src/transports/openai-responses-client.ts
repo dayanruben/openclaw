@@ -81,6 +81,10 @@ import {
   log,
   resolveOpenAIClientBaseUrl,
 } from "./openai-transport-shared.js";
+import {
+  filterProviderTurnHeadersForExplicitOpencodeSession,
+  resolveProviderTransportTurnState,
+} from "./provider-transport-turn-state.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   createWritableTransportEventStream,
@@ -125,36 +129,6 @@ function combineWebSocketTimeoutSignal(
     return signal;
   }
   return AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, resolvedTimeoutMs))]);
-}
-
-function resolveProviderTransportTurnState(
-  model: Model,
-  params: {
-    sessionId?: string;
-    turnId: string;
-    attempt: number;
-    transport: "stream" | "websocket";
-  },
-) {
-  const normalizedProvider = model.provider.trim().toLowerCase();
-  const allowRuntimePluginLoad =
-    normalizedProvider === "openai" ||
-    normalizedProvider === "azure-openai" ||
-    normalizedProvider === "azure-openai-responses";
-  return getAiTransportHost().plugin.resolveTransportTurnState({
-    provider: model.provider,
-    modelId: model.id,
-    allowRuntimePluginLoad,
-    context: {
-      provider: model.provider,
-      modelId: model.id,
-      model,
-      sessionId: params.sessionId,
-      turnId: params.turnId,
-      attempt: params.attempt,
-      transport: params.transport,
-    },
-  });
 }
 
 export function createOpenAIResponsesClient(
@@ -202,6 +176,23 @@ type ResponsesTransportExecutorOptions = {
   ) => ResponsesPricingOptions;
 };
 
+function withDefaultResponsesStreamEncoding(
+  fetch: typeof globalThis.fetch,
+): typeof globalThis.fetch {
+  return (input, init) => {
+    // Apply the SSE default after the SDK merges environment and caller headers.
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    if (headers.has("accept-encoding")) {
+      return fetch(input, init);
+    }
+    // Some compatible endpoints truncate compressed streams before the terminal event.
+    headers.set("accept-encoding", "identity");
+    return fetch(input, { ...init, headers });
+  };
+}
+
 function createResponsesTransportExecutor(config: ResponsesTransportExecutorOptions): StreamFn {
   return (model, context, options) => {
     const responsesOptions = options as OpenAIResponsesOptions | undefined;
@@ -224,12 +215,22 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           transport: websocketMode ? "websocket" : "stream",
         });
         const websocketSessionPolicy = websocketMode ? turnState?.websocket : undefined;
+        const httpTurnHeaders = filterProviderTurnHeadersForExplicitOpencodeSession(
+          model,
+          options,
+          turnState?.headers,
+        );
+        const websocketTurnHeaders = filterProviderTurnHeadersForExplicitOpencodeSession(
+          model,
+          options,
+          websocketSessionPolicy?.headers,
+        );
         const websocketHeaders = websocketMode
           ? buildOpenAIClientHeaders(
               model,
               context,
               options?.headers,
-              websocketSessionPolicy?.headers,
+              websocketTurnHeaders,
               options?.sessionId,
               options?.cacheRetention,
             )
@@ -238,7 +239,7 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           model,
           context,
           options?.headers,
-          turnState?.headers,
+          httpTurnHeaders,
           options?.sessionId,
           options?.cacheRetention,
         );
@@ -248,7 +249,9 @@ function createResponsesTransportExecutor(config: ResponsesTransportExecutorOpti
           httpHeaders,
           compactRequest
             ? createBoundedOpenAIResponsesCompactionFetch(buildGuardedModelFetch(model))
-            : undefined,
+            : config.streamRequest
+              ? withDefaultResponsesStreamEncoding(buildGuardedModelFetch(model))
+              : undefined,
         );
         const nativeAstra =
           model.id === "gpt-6-astra" && supportsNativeOpenAIResponsesEndpoint(model);
@@ -659,7 +662,7 @@ function resolveAzureDeploymentName(model: Model): string {
   });
 }
 
-export function createAzureOpenAIClient(
+function createAzureOpenAIClient(
   model: Model,
   apiKey: string,
   defaultHeaders: Record<string, string>,
