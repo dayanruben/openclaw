@@ -218,7 +218,7 @@ export type SessionCapability = {
     target: SessionRowTarget,
     listener: (row: GatewaySessionRow | null) => void,
     /** Matching events can omit descriptor-only fields; re-read those without watching roster revisions. */
-    options?: { onInvalidate?: () => void },
+    options?: { onInvalidate?: (reason?: string) => void },
   ) => SessionRowObservation;
   /** Preserve an existing row observation through a local presentation copy. */
   inheritRow: (
@@ -243,7 +243,7 @@ export type SessionCapability = {
   recover: (params: { key: string; agentId?: string }) => Promise<SessionsRecoverResult | null>;
   patch: SessionPatchRoute;
   archiveVisibility: (key: string) => SessionArchiveVisibility | undefined;
-  setArchivePending: (key: string, pending: boolean) => void;
+  beginArchive: (key: string, sessionId: string | undefined) => (() => void) | null;
   assignOwner: (
     key: string,
     owner: SessionsAssignOwnerParams["owner"],

@@ -941,6 +941,10 @@ enum class GatewayMethod(
   SessionsStorageRun("sessions.storage.run"),
   PluginsReload("plugins.reload"),
   ClawsPackagesRemove("claws.packages.remove"),
+  CanvasDocumentPreview("canvas.document.preview"),
+  ComputerStatus("computer.status"),
+  ComputerInvoke("computer.invoke"),
+  SessionsActivitySummaryEnsure("sessions.activitySummary.ensure"),
 }
 
 enum class GatewayEvent(

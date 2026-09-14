@@ -22,6 +22,10 @@ import {
   resolveUpdateParentGatewayActivation,
   shouldManageGatewayService,
 } from "./doctor-service-repair-policy.js";
+import {
+  recordUpdateDoctorRefusal,
+  resolveUpdateDoctorGitRecovery,
+} from "./doctor-update-refusal.js";
 
 function assertDoctorServiceSelection(env: NodeJS.ProcessEnv, serviceEnv: NodeJS.ProcessEnv): void {
   const selection = (candidate: NodeJS.ProcessEnv) => {
@@ -78,6 +82,7 @@ export async function beginDoctorMaintenance(params: {
     | undefined;
   const coordinators: Array<{ release(): void }> = [];
   let repairStoresMayBeOpen = false;
+  let inspectingActivation = false;
   let assertContinuationCurrent: (() => void) | undefined;
   const release = async () => {
     if (repairStoresMayBeOpen) {
@@ -111,6 +116,7 @@ export async function beginDoctorMaintenance(params: {
     ) {
       serviceMaintenance = await import("../cli/update-cli/update-command-service-maintenance.js");
       const { maybeStopManagedServiceBeforeMutableUpdate } = serviceMaintenance;
+      inspectingActivation = true;
       const inspection = await maybeStopManagedServiceBeforeMutableUpdate({
         updateInstallKind: "package",
         root: params.root,
@@ -159,6 +165,7 @@ export async function beginDoctorMaintenance(params: {
         );
       }
       if (inspection.serviceUpdateVerdict?.kind === "owned") {
+        inspectingActivation = false;
         if (inspection.serviceEnv) {
           assertDoctorServiceSelection(env, inspection.serviceEnv);
         }
@@ -185,6 +192,7 @@ export async function beginDoctorMaintenance(params: {
         );
       }
     }
+    inspectingActivation = false;
     const databasePath = path.resolve(resolveOpenClawStateSqlitePath(env));
     // Hold the reentrant lifecycle coordinators, not an in-tree Gateway lock:
     // individual migrations acquire their own in-tree locks under this scope.
@@ -202,17 +210,9 @@ export async function beginDoctorMaintenance(params: {
       // Classify unreadable state under the held owners without opening a writer.
       const { preflightOpenClawDatabaseSchemas } =
         await import("../state/openclaw-database-preflight.js");
-      const { OPENCLAW_STATE_SCHEMA_VERSION } =
-        await import("../state/openclaw-state-db-contract.js");
-      const { OPENCLAW_AGENT_SCHEMA_VERSION } =
-        await import("../state/openclaw-agent-db-contract.js");
       const schemas = await preflightOpenClawDatabaseSchemas({
         env,
         scope: "state",
-        supportedVersions: {
-          state: OPENCLAW_STATE_SCHEMA_VERSION,
-          agent: OPENCLAW_AGENT_SCHEMA_VERSION,
-        },
       });
       const unreadable = schemas.indeterminate.find((database) => database.kind === "state");
       if (unreadable) {
@@ -226,10 +226,18 @@ export async function beginDoctorMaintenance(params: {
     if (error instanceof DoctorUnreadableStateDatabaseError) {
       throw error;
     }
-    throw new Error(
+    const refusal = new Error(
       `Doctor could not enter maintenance. ${String(error)} Stop the Gateway service and other OpenClaw processes using this state, then run ${formatCliCommand("openclaw doctor --fix", env)} from an independent shell.`,
       { cause: error },
     );
+    const recovery = inspectingActivation
+      ? await resolveUpdateDoctorGitRecovery({ root: params.root })
+      : undefined;
+    if (recovery) {
+      refusal.message += `\n${recovery.message}`;
+      recordUpdateDoctorRefusal(refusal.message);
+    }
+    throw refusal;
   }
   return {
     release,

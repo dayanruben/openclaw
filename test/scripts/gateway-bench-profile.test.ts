@@ -3,8 +3,138 @@ import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, it } from "vitest";
-import { controlGatewayProfile } from "../../scripts/lib/gateway-bench-profile.js";
+import { fileURLToPath } from "node:url";
+import { expect, it, onTestFinished } from "vitest";
+import {
+  controlGatewayProfile,
+  measureGatewayCpuUsage,
+  readGatewayCpuUsage,
+} from "../../scripts/lib/gateway-bench-profile.js";
+
+it("measures fixed CPU work including a retired Worker without starting the inspector", async () => {
+  const child = spawn(
+    process.execPath,
+    [fileURLToPath(new URL("./fixtures/gateway-bench-cpu-usage.mjs", import.meta.url))],
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] },
+  );
+  const closed = once(child, "close");
+  let stderr = "";
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  onTestFinished(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+    }
+    await closed;
+  });
+  await waitMessage(child, "ready");
+  const before = await readGatewayCpuUsage(child);
+  const mainCompleted = once(child, "message");
+  child.send({ run: "main" });
+  const [mainResult] = await mainCompleted;
+  expect(mainResult, stderr).toMatchObject({ completed: 1, checksum: expect.any(Number) });
+  const afterMain = await readGatewayCpuUsage(child);
+  const mainUsage = measureGatewayCpuUsage(before, afterMain);
+
+  expect(mainUsage.pid).toBe(child.pid);
+  expect(mainUsage.wallMs).toBeGreaterThan(0);
+  expect(mainUsage.mainThread.totalMs).toBeGreaterThan(0);
+  // Startup performs more fixed work than this window; cumulative counters would include it.
+  expect(mainUsage.mainThread.totalMs).toBeLessThan(
+    (before.mainThread.user + before.mainThread.system) / 1_000,
+  );
+
+  const workerCompleted = once(child, "message");
+  child.send({ run: "worker" });
+  const [workerResult] = await workerCompleted;
+  expect(workerResult, stderr).toMatchObject({
+    completed: 1,
+    workerRetired: true,
+    checksum: mainResult.checksum,
+  });
+  const afterWorker = await readGatewayCpuUsage(child);
+  const workerUsage = measureGatewayCpuUsage(afterMain, afterWorker);
+  expect(workerUsage.process.totalMs).toBeGreaterThan(workerUsage.mainThread.totalMs);
+  expect(workerUsage.process.totalMs).toBeGreaterThanOrEqual(workerResult.workerCpuMicros / 1_000);
+}, 30_000);
+
+it.each(["exit", "disconnect"])("rejects a CPU sample when the child %ss", async (action) => {
+  const child = spawn(
+    process.execPath,
+    ["-e", `process.on("message", () => process.${action}()); process.send({ ready: true });`],
+    { stdio: ["ignore", "ignore", "pipe", "ipc"] },
+  );
+  const closed = once(child, "close");
+  onTestFinished(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+    }
+    await closed;
+  });
+  await waitMessage(child, "ready");
+  await expect(readGatewayCpuUsage(child)).rejects.toThrow(/Gateway (exited|disconnected)/);
+  await closed;
+  for (const event of ["message", "exit", "disconnect", "error"]) {
+    expect(child.listenerCount(event)).toBe(0);
+  }
+});
+
+it.each([false, true])(
+  "settles startup profiling across builtin initialization with unknown identity=%s",
+  async (unknownIdentity) => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "gateway-worker-profile-startup-"));
+    const child = spawn(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./fixtures/gateway-bench-profile-startup.mjs", import.meta.url)),
+        directory,
+        String(unknownIdentity),
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closed = once(child, "close");
+    let cleanupPending: Promise<void> | undefined;
+    const cleanup = () =>
+      (cleanupPending ??= (async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill();
+        }
+        await closed;
+        await rm(directory, { recursive: true, force: true });
+      })());
+    onTestFinished(cleanup);
+    try {
+      const [code, signal] = await closed;
+      expect({ code, signal }, stderr).toEqual({ code: 0, signal: null });
+      const { threadId, manifest, samplerStopProbe } = JSON.parse(
+        await readFile(path.join(directory, "result.json"), "utf8"),
+      );
+      expect(manifest.workers).toHaveLength(1);
+      if (unknownIdentity) {
+        expect(manifest.workers[0].completed).not.toBe(true);
+        expect(manifest.workers[0].threadId).toBeUndefined();
+        expect(manifest.workers[0].error).toBeTruthy();
+        expect(samplerStopProbe.error.message).toMatch(/not started/i);
+      } else {
+        expect(manifest.workers[0]).toMatchObject({ completed: true, threadId });
+        expect(manifest.workers[0].inspectorWorkerId).not.toBe(String(threadId));
+        expect(await readFile(manifest.workers[0].profilePath, "utf8")).toContain(
+          "allocateAtStartup",
+        );
+      }
+    } finally {
+      await cleanup();
+    }
+  },
+  30_000,
+);
 
 const workload = `
 const { Worker } = require('node:worker_threads');
