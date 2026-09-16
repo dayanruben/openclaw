@@ -91,7 +91,7 @@ import {
   markRequesterTurnYieldedInRuns,
   settleRequesterTurnAfterSessionSpawns,
 } from "./subagent-registry-requester-yield.js";
-import { markSubagentRunPausedAfterYield } from "./subagent-registry-run-manager.js";
+import { markSubagentRunPausedAfterYield } from "./subagent-registry-run-pause.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 type LifecycleControllerParams = SubagentLifecycleOptions;
@@ -6086,7 +6086,7 @@ describe("requester settle wake trigger", () => {
       const capability = createCronCreatorAuthorityCapability(
         requesterTurnRunId,
         { kind: "unknown" },
-        true,
+        { source: "control-ui-admin" },
       )!;
       try {
         await runWithCronCreatorAuthorityCapability(capability, () =>

@@ -20,10 +20,12 @@ import type {
   CodexThreadTurnsListParams,
   CodexThreadTurnsListResponse,
 } from "./app-server/protocol.js";
+import type { CodexControlRequestObservation } from "./app-server/request-observation.js";
 import { withTimeout } from "./app-server/timeout.js";
 import {
   currentCodexCatalogListDiagnostics,
   startCodexCatalogPageDiagnostics,
+  startCodexCatalogControlRequestDiagnostics,
   waitForCodexCatalogPage,
 } from "./session-catalog-diagnostics.js";
 import { createCodexCatalogHomeResolver, type CodexCatalogHome } from "./session-catalog-homes.js";
@@ -41,6 +43,7 @@ import {
   isOpenClawManagedCodexThread,
   readCodexSessionMeta,
 } from "./session-catalog-provenance.js";
+import { CodexCatalogSourceBackoff } from "./session-catalog-source-backoff.js";
 import type {
   CodexSessionCatalogControl,
   CodexSessionCatalogControlFactory,
@@ -97,7 +100,11 @@ function codexCatalogPageCacheKey(
 
 type CodexSessionCatalogRequestSnapshot = {
   requestTimeoutMs: number;
-  listThreads(params: CodexThreadListParams, timeoutMs: number): Promise<CodexThreadListResponse>;
+  listThreads(
+    params: CodexThreadListParams,
+    timeoutMs: number,
+    observation?: CodexControlRequestObservation,
+  ): Promise<CodexThreadListResponse>;
   listThreadTurns(params: CodexThreadTurnsListParams): Promise<CodexThreadTurnsListResponse>;
   listThreadItems(params: CodexThreadItemsListParams): Promise<CodexThreadItemsListResponse>;
   forkThread(
@@ -121,6 +128,7 @@ type CodexCatalogRequest = <M extends CodexCatalogRequestMethod>(
   requestParams: CodexAppServerRequestParams<M>,
   timeoutMs?: number,
   assertCurrent?: () => void,
+  observation?: CodexControlRequestObservation,
 ) => Promise<CodexAppServerRequestResult<M>>;
 
 function createCodexCatalogRequestSnapshot(
@@ -129,8 +137,8 @@ function createCodexCatalogRequestSnapshot(
 ): CodexSessionCatalogRequestSnapshot {
   return {
     requestTimeoutMs,
-    listThreads: (params, timeoutMs) =>
-      request(CODEX_CONTROL_METHODS.listThreads, params, timeoutMs),
+    listThreads: (params, timeoutMs, observation) =>
+      request(CODEX_CONTROL_METHODS.listThreads, params, timeoutMs, undefined, observation),
     listThreadTurns: (params) => request(CODEX_CONTROL_METHODS.listThreadTurns, params),
     listThreadItems: (params) => request(CODEX_CONTROL_METHODS.listThreadItems, params),
     forkThread: (params, assertCurrent) =>
@@ -294,6 +302,7 @@ function createCodexSessionCatalogControlFromRequests(params: {
             diagnostics.fields.controlRequestCalls++;
           }
           let response: CodexThreadListResponse;
+          const observation = startCodexCatalogControlRequestDiagnostics(diagnostics);
           try {
             response = await requests.listThreads(
               {
@@ -308,8 +317,13 @@ function createCodexSessionCatalogControlFromRequests(params: {
                 ...(cursor ? { cursor } : {}),
               },
               remainingTimeoutMs,
+              observation,
             );
+          } catch (error) {
+            observation?.rejected();
+            throw error;
           } finally {
+            observation?.close();
             if (diagnostics) {
               const elapsed = performance.now() - requestStarted;
               diagnostics.fields.inclusiveControlRequestWaitMs =
@@ -429,6 +443,7 @@ export function createCodexSessionCatalogControl(params: {
     Map<string, CodexCatalogRequestOptions>
   >();
   const catalogPagesByConfig = new WeakMap<OpenClawConfig, CodexCatalogPageCache>();
+  const sourceBackoff = new CodexCatalogSourceBackoff(now);
   const resolveRequestOptions = (
     startOptions: CodexAppServerStartOptions,
     agentId: string | undefined,
@@ -479,12 +494,13 @@ export function createCodexSessionCatalogControl(params: {
         : undefined;
     return createCodexCatalogRequestSnapshot(
       runtime.requestTimeoutMs,
-      async (method, requestParams, timeoutMs, assertCurrent) => {
+      async (method, requestParams, timeoutMs, assertCurrent, observation) => {
         const { codexControlRequest } = await import("./command-rpc.js");
         return await codexControlRequest(pluginConfig, method, requestParams, {
           ...requestOptions,
           authProfileId: null,
           assertCurrent,
+          ...(observation ? { controlObservation: observation } : {}),
           ...(catalogListKey && method === CODEX_CONTROL_METHODS.listThreads
             ? { catalogListKey }
             : {}),
@@ -532,6 +548,7 @@ export function createCodexSessionCatalogControl(params: {
             requestParams: CodexAppServerRequestParams<M>,
             timeoutMs?: number,
             assertCurrent?: () => void,
+            observation?: CodexControlRequestObservation,
           ): Promise<CodexAppServerRequestResult<M>> =>
             await requestCodexAppServerClientJson<CodexAppServerRequestResult<M>>({
               client,
@@ -540,6 +557,7 @@ export function createCodexSessionCatalogControl(params: {
               config: runtimeConfig,
               timeoutMs: timeoutMs ?? runtime.requestTimeoutMs,
               assertCurrent,
+              ...(observation ? { controlObservation: observation } : {}),
             }),
         );
         const pinnedControl: CodexSessionCatalogControl =
@@ -616,6 +634,16 @@ export function createCodexSessionCatalogControl(params: {
           }
           return await waitForCodexCatalogPage(pending.page, pending.producerOperationId);
         }
+        const attempt = sourceBackoff.begin(runtimeConfig, agentId, source?.sourceHomeId);
+        if (!attempt.allowed) {
+          if (cached) {
+            if (listDiagnostics) {
+              listDiagnostics.fields.staleHits++;
+            }
+            return cached.value;
+          }
+          throw attempt.error;
+        }
         if (listDiagnostics) {
           if (cached) {
             listDiagnostics.fields.staleHits++;
@@ -631,6 +659,7 @@ export function createCodexSessionCatalogControl(params: {
           .listPage(pageParams, diagnostics ?? null)
           .then(
             (value) => {
+              attempt.resolved();
               cache.settled.delete(key);
               cache.settled.set(key, {
                 value,
@@ -640,6 +669,7 @@ export function createCodexSessionCatalogControl(params: {
               return value;
             },
             (error: unknown) => {
+              attempt.rejected(error);
               if (cached && cache.settled.get(key) === cached) {
                 cached.expiresAt = now();
               }
