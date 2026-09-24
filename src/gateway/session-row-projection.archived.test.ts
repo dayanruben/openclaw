@@ -1,6 +1,11 @@
+import { StatementSync } from "node:sqlite";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
-import { replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
+import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
+import {
+  deleteSessionEntryLifecycle,
+  replaceSessionEntrySync,
+} from "../config/sessions/session-accessor.js";
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -55,7 +60,7 @@ it("keeps archived rows cold at hydration and across broad refreshes", async () 
       for (const scope of ["catalog", "config", "stores", { agentId: "main" }] as const) {
         const before = projection.materializedCount;
         sessionChanges.emit({ all: true, scope });
-        expect(projection.dirtyRowCount).toBe(live);
+        expect(projection.dirtyRowCount).toBe(scope === "catalog" ? live : live + archived);
         await projection.ensureMaterialized();
         expect(projection.materializedCount - before).toBe(live);
         expect(reads.mock.calls.some(([row]) => row.entry?.archivedAt !== undefined)).toBe(false);
@@ -78,6 +83,112 @@ it("keeps archived rows cold at hydration and across broad refreshes", async () 
       expect(placementReads).not.toHaveBeenCalled();
     } finally {
       projection.dispose();
+      release();
+    }
+  });
+});
+
+it("reindexes cold lineage when a literal parent appears and disappears", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const cfg = {
+      agents: { entries: { alpha: { default: true }, main: {} } },
+      session: { scope: "global" as const },
+    };
+    await state.writeConfig(cfg);
+    state.applyEnv();
+    const parent = "agent:main:main";
+    const child = "agent:alpha:dashboard:cold-child";
+    const writeParent = (sessionKey: string, model: string) =>
+      replaceSessionEntrySync(
+        { agentId: "main", sessionKey },
+        {
+          sessionId: sessionKey,
+          updatedAt: 1,
+          providerOverride: "ollama",
+          modelOverride: model,
+          modelOverrideSource: "user",
+          modelOverrideRouteResolution: "resolved",
+        },
+      );
+    writeParent("global", "qwen3:8b");
+    replaceSessionEntrySync(
+      { agentId: "alpha", sessionKey: child },
+      {
+        sessionId: "cold-child",
+        updatedAt: 1,
+        status: "running",
+        archivedAt: 1,
+        parentSessionKey: parent,
+        spawnedBy: parent,
+      },
+    );
+    const release = retainSessionListForegroundWork();
+    let projection: Awaited<ReturnType<typeof createSessionRowProjection>> | undefined;
+    let boardReads: ReturnType<typeof observeSqliteReadSql> | undefined;
+    try {
+      projection = await createSessionRowProjection({ cfg, modelCatalog: [] });
+      const initial = projection
+        .selectEntries({ parentSessionKey: "global" })
+        .find((row) => row.key === child)!;
+      expect(initial).toBeDefined();
+      expect(ready(initial)).toBe(false);
+      boardReads = observeSqliteReadSql(StatementSync.prototype);
+      const check = async (literal: boolean) => {
+        if (!projection) {
+          throw new Error("Expected a live projection");
+        }
+        // Query the parent index first: describing the child would hide a stale cold edge.
+        const selected = projection.selectEntries({
+          parentSessionKey: literal ? parent : "global",
+        });
+        const row = selected.find((entry) => entry.key === child);
+        expect(row).toMatchObject({
+          entry: {
+            parentSessionKey: literal ? parent : "global",
+            spawnedBy: literal ? parent : "global",
+          },
+        });
+        expect(row?.generation).toBe(initial.generation);
+        expect(row?.membership).toBe(initial.membership);
+        expect(row?.hasBoard).toBe(initial.hasBoard);
+        expect(row?.materialized).toBeUndefined();
+        expect(boardReads?.queries.filter((sql) => sql.includes("board_tabs"))).toEqual([]);
+        if (literal) {
+          expect(
+            projection.selectEntries({ parentSessionKey: "global" }).map((entry) => entry.key),
+          ).not.toContain(child);
+        }
+        await projection.ensureMaterialized();
+        expect(
+          projection.snapshot({ agentId: "main", key: literal ? parent : "global" }).row
+            ?.childSessions,
+        ).toContain(child);
+        if (literal) {
+          expect(
+            projection.snapshot({ agentId: "main", key: "global" }).row?.childSessions ?? [],
+          ).not.toContain(child);
+        }
+        expect(projection.selectEntries({ key: child })[0]?.materialized).toBeUndefined();
+      };
+      await check(false);
+      writeParent("global", "qwen3:14b");
+      await check(false);
+      writeParent(parent, "qwen3:32b");
+      await check(true);
+      await deleteSessionEntryLifecycle({
+        agentId: "main",
+        storePath: projection.capture({ agentId: "main", key: parent })!.storeTarget.storePath,
+        archiveTranscript: false,
+        target: { canonicalKey: parent, storeKeys: [parent] },
+      });
+      await check(false);
+      const listed = await listProjectedSessions({ projection, opts: { archived: true } });
+      expect(listed.sessions).toEqual([
+        expect.objectContaining({ key: child, model: "qwen3:14b" }),
+      ]);
+    } finally {
+      boardReads?.restore();
+      projection?.dispose();
       release();
     }
   });

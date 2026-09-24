@@ -25,7 +25,8 @@ import {
   compareReleaseJobsByName,
   composeReleaseChildAttemptEvidence,
   formatReleaseStateOutcome,
-  isReleaseCheckJobAdvisory,
+  normalizeReleaseLaneWaiver,
+  releaseJobAdvisoryReason,
   isReleaseGhArtifactMissingError,
   isSplitChangelogEvidenceDelta,
   classifyReleaseChangelogEvidenceComparison,
@@ -38,6 +39,7 @@ import {
   validateReleaseChildDispatchBinding,
   validateReleaseCoveragePolicyBinding,
   validateReleaseExecutionPlanArtifact,
+  validateRetiredReleaseRetryFields,
   validateReleaseChildRunProvenance,
   validateReleaseStateArtifact,
   validateReleaseTelegramWaiverBinding,
@@ -1117,25 +1119,50 @@ function normalizeManifestChildEvidence(value) {
   );
 }
 
-export function releaseAdvisoryJobEvidence(childEvidence, releaseProfile, workflowRef) {
+export function releaseAdvisoryJobEvidence(
+  childEvidence,
+  releaseProfile,
+  workflowRef,
+  laneWaiver = "",
+) {
+  const normalizedWaiver = normalizeReleaseLaneWaiver(laneWaiver);
   return Object.entries(childEvidence ?? {})
     .toSorted(([left], [right]) => left.localeCompare(right))
-    .flatMap(([child, evidence]) =>
-      /^releaseChecks(?:Independent|Candidate)?$/u.test(child)
-        ? evidence.jobs
-            .filter((job) =>
-              isReleaseCheckJobAdvisory({ jobName: job.name, releaseProfile, workflowRef }),
-            )
-            .toSorted(compareReleaseJobsByName)
-            .map((job) => ({
-              child,
-              job: job.name,
-              status: job.status,
-              conclusion: job.conclusion,
-              policy: "advisory",
-            }))
-        : [],
-    );
+    .flatMap(([child, evidence]) => {
+      const failed = evidence.jobs.filter(
+        (job) =>
+          job.status === "completed" &&
+          !["neutral", "skipped", "success"].includes(String(job.conclusion ?? "")),
+      );
+      return failed
+        .map((job) => ({
+          job,
+          reason: releaseJobAdvisoryReason({
+            childKey: child,
+            jobName: job.name,
+            releaseProfile,
+            workflowRef,
+            laneWaiver: normalizedWaiver,
+            jobs: evidence.jobs,
+          }),
+        }))
+        .filter(({ reason }) => reason !== "")
+        .toSorted((left, right) => compareReleaseJobsByName(left.job, right.job))
+        .map(({ job, reason }) => {
+          /** @type {{ child: string, job: string, status: string, conclusion: string, policy: string, reason?: string }} */
+          const entry = {
+            child,
+            job: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            policy: "advisory",
+          };
+          if (reason === "lane_waiver") {
+            entry.reason = reason;
+          }
+          return entry;
+        });
+    });
 }
 
 function manifestEvidenceIdentity(manifest) {
@@ -1154,6 +1181,7 @@ export function validateParentManifest(value, expected) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("release validation manifest must be an object");
   }
+  validateRetiredReleaseRetryFields(value);
   if (![2, 3, 4].includes(value.version) || value.workflowName !== "Full Release Validation") {
     throw new Error("release validation manifest schema is unsupported");
   }
@@ -1241,6 +1269,12 @@ export function validateParentManifest(value, expected) {
           value.validationInputs,
           "release validation manifest validation inputs",
         );
+  if (
+    Object.hasOwn(validationInputs ?? {}, "knownFlakyJobsJson") &&
+    validationInputs.knownFlakyJobsJson !== "[]"
+  ) {
+    throw new Error("release validation manifest knownFlakyJobsJson must be empty");
+  }
   const sourceAdmission = validatePublicationSourceBinding(value, expected);
   const publicationAdmission = validatePublicationAdmissionBinding(value, expected);
   normalizeReleaseTelegramWaiver({
@@ -1273,10 +1307,55 @@ export function validateParentManifest(value, expected) {
     );
   }
   const childEvidence = normalizeManifestChildEvidence(value.childEvidence);
-  const advisoryJobs = releaseAdvisoryJobEvidence(childEvidence, releaseProfile, value.workflowRef);
+  const advisoryJobs = releaseAdvisoryJobEvidence(
+    childEvidence,
+    releaseProfile,
+    value.workflowRef,
+    validationInputs?.laneWaiver,
+  );
+  let recordedAdvisoryJobs = value.advisoryJobs;
   if (
-    value.advisoryJobs !== undefined &&
-    JSON.stringify(sortReleaseJsonValueKeys(value.advisoryJobs)) !==
+    Object.hasOwn(value, "knownFlakyJobs") &&
+    Object.hasOwn(value, "automaticRetries") &&
+    Array.isArray(recordedAdvisoryJobs)
+  ) {
+    const seen = new Set();
+    // Published empty-retry manifests classified execution rows descriptively.
+    // Authenticate the original row, then apply current policy to its outcome.
+    recordedAdvisoryJobs = recordedAdvisoryJobs.flatMap((row) => {
+      const key = JSON.stringify([row.child, row.job]);
+      if (seen.has(key)) {
+        throw new Error("release validation advisory jobs duplicate a child job");
+      }
+      seen.add(key);
+      if (row.reason !== undefined) {
+        return [row];
+      }
+      const jobs = (childEvidence?.[row.child]?.jobs ?? []).filter((job) => job.name === row.job);
+      const expectedRow =
+        jobs.length === 1
+          ? {
+              child: row.child,
+              job: jobs[0].name,
+              status: jobs[0].status,
+              conclusion: jobs[0].conclusion,
+              policy: "advisory",
+            }
+          : undefined;
+      if (
+        expectedRow === undefined ||
+        JSON.stringify(sortReleaseJsonValueKeys(row)) !==
+          JSON.stringify(sortReleaseJsonValueKeys(expectedRow))
+      ) {
+        throw new Error("release validation historical advisory job differs from child evidence");
+      }
+      const current = advisoryJobs.find((job) => job.child === row.child && job.job === row.job);
+      return current ? [current] : [];
+    });
+  }
+  if (
+    recordedAdvisoryJobs !== undefined &&
+    JSON.stringify(sortReleaseJsonValueKeys(recordedAdvisoryJobs)) !==
       JSON.stringify(sortReleaseJsonValueKeys(advisoryJobs))
   ) {
     throw new Error("release validation advisory jobs differ from canonical policy evidence");
@@ -1381,6 +1460,10 @@ export function validateParentManifest(value, expected) {
   }
   return {
     advisoryJobs,
+    ...(Object.hasOwn(value, "knownFlakyJobs") ? { knownFlakyJobs: value.knownFlakyJobs } : {}),
+    ...(Object.hasOwn(value, "automaticRetries")
+      ? { automaticRetries: value.automaticRetries }
+      : {}),
     ...(value.publicationAdmissionContract !== undefined
       ? { publicationAdmissionContract: value.publicationAdmissionContract, publicationAdmission }
       : {}),
@@ -1818,10 +1901,8 @@ export function validateManifestChildRun(
   return run;
 }
 
-export function validatePerformanceArtifactOnlyJobs(jobs, runAttempt) {
-  const normalizedRunAttempt = normalizePositiveInteger(runAttempt, "performance run attempt");
-  const currentJobs = jobs.filter((job) => Number(job.run_attempt) === normalizedRunAttempt);
-  const guards = currentJobs.filter((job) => job.name === "Verify artifact-only report mode");
+export function validatePerformanceArtifactOnlyJobs(jobs) {
+  const guards = jobs.filter((job) => job.name === "Verify artifact-only report mode");
   if (
     guards.length !== 1 ||
     guards[0].status !== "completed" ||
@@ -1829,7 +1910,7 @@ export function validatePerformanceArtifactOnlyJobs(jobs, runAttempt) {
   ) {
     throw new Error("performance artifact-only guard is missing or unsuccessful");
   }
-  const unsafePublisher = currentJobs.find(
+  const unsafePublisher = jobs.find(
     (job) =>
       String(job.name ?? "").startsWith("Publish ") &&
       String(job.name ?? "").endsWith(" report") &&
@@ -2471,7 +2552,6 @@ async function validateStrictChildRun({
   );
   let jobs;
   let composite;
-  let currentAttemptJobs;
   if (plannedChild && childEvidence) {
     if (childEvidence.effectiveRunAttempt > effectiveRunAttempt) {
       throw new Error(`manifest child composite evidence mismatch: ${child.name}`);
@@ -2482,7 +2562,7 @@ async function validateStrictChildRun({
       runAttempt <= childEvidence.effectiveRunAttempt;
       runAttempt += 1
     ) {
-      currentAttemptJobs = await client.getRunAttemptJobs(runId, runAttempt);
+      const currentAttemptJobs = await client.getRunAttemptJobs(runId, runAttempt);
       attempts.push({ jobs: currentAttemptJobs, runAttempt });
     }
     const evidence = composeReleaseChildAttemptEvidence({
@@ -2540,20 +2620,16 @@ async function validateStrictChildRun({
       },
       releaseProfile,
       parentEvidence.manifest.workflowRef,
+      parentEvidence.manifest.validationInputs?.laneWaiver,
     )
   ) {
     throw new Error(`manifest child run does not pass release policy: ${child.name}`);
   }
   if (child.manifestKey === "productPerformance") {
-    // A composite may carry earlier successes; the publication guard must pass
-    // in the current raw attempt, already fetched while composing the evidence.
+    // The authenticated composite selects the newest executed attempt per job,
+    // including a carried guard or a newer failure that supersedes its success.
     validatePerformanceArtifactOnlyJobs(
-      composite
-        ? currentAttemptJobs.map((job) =>
-            Object.assign({}, job, { run_attempt: effectiveRunAttempt }),
-          )
-        : jobs,
-      effectiveRunAttempt,
+      composite ? jobs : jobs.filter((job) => Number(job.run_attempt) === effectiveRunAttempt),
     );
   }
 
@@ -2562,6 +2638,7 @@ async function validateStrictChildRun({
       { [child.manifestKey]: { jobs } },
       releaseProfile,
       parentEvidence.manifest.workflowRef,
+      parentEvidence.manifest.validationInputs?.laneWaiver,
     ),
     conclusion: run.conclusion,
     dispatchNonce: `full-release-validation-${parentEvidence.manifest.runId}-${originAttempt}${child.suffix}`,
@@ -3482,8 +3559,14 @@ async function main() {
     }
 
     const selectedKeys = requiredChildKeysForManifest(sourceManifest);
+    if (sourceManifest.validationInputs?.laneWaiver) {
+      console.log(`lane-waiver: ${sourceManifest.validationInputs.laneWaiver}`);
+    }
     for (const job of sourceManifest.advisoryJobs) {
-      console.log(`advisory: ${job.child} ${job.status}/${job.conclusion || "none"} ${job.job}`);
+      const failed = job.status === "completed" && job.conclusion !== "success";
+      console.log(
+        `${failed ? "::warning title=Advisory lane failed::" : "advisory: "}${job.reason === "lane_waiver" ? "(lane waiver) " : ""}${job.child} ${job.status}/${job.conclusion || "none"} ${job.job}`,
+      );
     }
     const expectedChildren = expectedSelectedChildDispatches(
       sourceManifest.runId,
@@ -3526,8 +3609,9 @@ async function main() {
       );
       if (child.manifestKey === "productPerformance") {
         validatePerformanceArtifactOnlyJobs(
-          await findParentJobsAll(childRunId, repository),
-          run.run_attempt,
+          (await findParentJobsAll(childRunId, repository)).filter(
+            (job) => Number(job.run_attempt) === Number(run.run_attempt),
+          ),
         );
       }
       children.push({ child, run: validatedRun });

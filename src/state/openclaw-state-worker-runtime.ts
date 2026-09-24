@@ -14,8 +14,13 @@ import {
   executeMcpOAuthWorkerCommand,
 } from "../agents/mcp-oauth-store.worker.js";
 import { importSandboxRegistryRow } from "../agents/sandbox/registry-import.worker.js";
+import { writeSandboxRegistry } from "../agents/sandbox/registry-write.worker.js";
 import { writeSubagentRunValuesInDatabase } from "../agents/subagents/registry/subagent-registry.store.kernel.js";
-import * as worktreeRegistry from "../agents/worktrees/registry-read.kernel.js";
+import {
+  isWorktreeRegistryReadCommand,
+  executeWorktreeRegistryReadCommand,
+} from "../agents/worktrees/registry-read.worker.js";
+import { executeWorktreeRunLeaseCommand } from "../agents/worktrees/run-lease-store.worker.js";
 import { listAuditEventsInDatabase } from "../audit/audit-event-read.kernel.js";
 import { executeAuditWriterCommand } from "../audit/audit-event-writer.worker.js";
 import { readClawInstallSchemaVersionRows } from "../claws/provenance-runtime-read.kernel.js";
@@ -111,7 +116,10 @@ import * as skillWorkshop from "../skills/workshop/store.worker.js";
 import { isTaskRegistryWorkerCommand } from "../tasks/task-registry.worker-contract.js";
 import { executeTaskRegistryCommand } from "../tasks/task-registry.worker.js";
 import { executeTranscriptRead } from "../transcripts/store-worker-read.js";
-import { executeTranscriptWrite } from "../transcripts/store-worker-write.js";
+import {
+  executeTranscriptWrite,
+  isTranscriptWriteCommand,
+} from "../transcripts/store-worker-write.js";
 import {
   listAgentProvenanceInDatabase,
   readAgentProvenanceBatchInDatabase,
@@ -408,6 +416,9 @@ export function executeSharedStateCommand(
       }) ?? { state: {}, basis: {} }
     );
   }
+  if (isNodeWorkerJournalCommand(command)) {
+    return executeNodeWorkerJournalCommand(command, context.databasePath, open);
+  }
   if (command.type === "deviceAuth.read" || command.type === "deviceAuth.readOrigin") {
     const read = (db: OpenClawStateDatabase["db"]) =>
       command.type === "deviceAuth.read"
@@ -430,10 +441,11 @@ export function executeSharedStateCommand(
   if (command.type === "deviceAuth.list") {
     return deviceAuth.readDeviceAuthTokensFromDatabase(database.db, command.input);
   }
-  if (command.type === "transcripts.append" || command.type === "transcripts.writeSummary") {
+  if (isTranscriptWriteCommand(command)) {
     return executeTranscriptWrite(command, { database, path: context.databasePath });
   }
   switch (command.type) {
+    case "transcripts.canonicalSessionRow":
     case "transcripts.readEntries":
     case "transcripts.exportOwnership":
     case "transcripts.exportPathCollisions":
@@ -474,18 +486,6 @@ export function executeSharedStateCommand(
   if (command.type === "nativeHookRelay.listSnapshots") {
     return listNativeHookRelayBridgeSnapshotsInDatabase(database);
   }
-  if (
-    command.type === "nativeHookRelay.write" ||
-    command.type === "nativeHookRelay.renew" ||
-    command.type === "nativeHookRelay.deleteOwned" ||
-    command.type === "nativeHookRelay.prune"
-  ) {
-    return executeNativeHookRelayMutation(command, {
-      database,
-      path: context.databasePath,
-      env: getSqliteWorkerStateContext().environment,
-    });
-  }
   if (command.type === "sessionUpstream.listWatched") {
     return listWatchedSessionUpstreamLinksInDatabase(database.db);
   }
@@ -500,8 +500,19 @@ export function executeSharedStateCommand(
     path: context.databasePath,
     env: getSqliteWorkerStateContext().environment,
   };
+  if (
+    command.type === "nativeHookRelay.write" ||
+    command.type === "nativeHookRelay.renew" ||
+    command.type === "nativeHookRelay.deleteOwned" ||
+    command.type === "nativeHookRelay.prune"
+  ) {
+    return executeNativeHookRelayMutation(command, writeOptions);
+  }
   if (command.type === "sandboxRegistry.insertIfMissing") {
     return importSandboxRegistryRow(command.input, writeOptions);
+  }
+  if (command.type === "sandboxRegistry.write") {
+    return writeSandboxRegistry(command.input, writeOptions);
   }
   if (command.type === "secrets.purge") {
     return purgeExpiredSecretStoreEntriesInDatabase(command.input, writeOptions);
@@ -511,9 +522,6 @@ export function executeSharedStateCommand(
     command.type === "conversationBindings.touch"
   ) {
     return executeCurrentConversationBindingCommand(command, writeOptions);
-  }
-  if (isNodeWorkerJournalCommand(command)) {
-    return executeNodeWorkerJournalCommand(command, writeOptions);
   }
   if (command.type === "sessionGroups.mutate") {
     return mutateSessionGroupCatalogInDatabase(database, command.input, writeOptions.env);
@@ -620,10 +628,11 @@ export function executeSharedStateCommand(
     ensureProjectRegistrySchema(writeOptions);
     return listProjectRegistryInDatabase(database.db);
   }
-  if (command.type === "worktrees.list" || command.type === "worktrees.liveIds") {
-    return command.type === "worktrees.list"
-      ? worktreeRegistry.listRegistryWorktreesInDatabase(database.db)
-      : worktreeRegistry.listLiveRegistryWorktreeIdsInDatabase(database.db);
+  if (isWorktreeRegistryReadCommand(command)) {
+    return executeWorktreeRegistryReadCommand(database.db, command);
+  }
+  if (command.type === "worktrees.releaseRunLease" || command.type === "worktrees.reapRunLeases") {
+    return executeWorktreeRunLeaseCommand(command, writeOptions);
   }
   if (command.type === "projects.resolve") {
     ensureProjectRegistrySchema(writeOptions);
