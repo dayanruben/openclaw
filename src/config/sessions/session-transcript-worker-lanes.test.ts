@@ -6,6 +6,7 @@ import { createDeferredCore } from "../../shared/deferred.js";
 import {
   historyLane,
   maintenanceLane,
+  projectionLane,
   withSessionHistoryWorkerReadCandidates,
 } from "./session-transcript-worker-resources.js";
 import {
@@ -17,8 +18,9 @@ import type { SessionHistoryWorkerDatabase } from "./session-transcript-worker.t
 type Resource = { close: () => Promise<void>; agentId?: string; revoke: () => void };
 const observed = vi.hoisted(() => ({
   run: vi.fn<(input: unknown, options: WorkerTaskOptions<unknown>) => Promise<unknown>>(),
-  rotate: vi.fn<() => Promise<void>>(),
-  closeResources: vi.fn<(key?: string) => Promise<void>>(),
+  // Import-time pools are drained even when a name filter skips every test.
+  rotate: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+  closeResources: vi.fn<(key?: string) => Promise<void>>().mockResolvedValue(undefined),
   unregister: vi.fn<() => void>(),
   resources: [] as Resource[],
 }));
@@ -140,12 +142,12 @@ it.runIf(!process.versions.bun)(
 );
 
 it.each([false, true])(
-  "revokes both reader lanes and joins their cleanup (pending=%s)",
+  "revokes history, projection and maintenance readers and joins their cleanup (pending=%s)",
   async (pending) => {
     const request = input();
     observed.run.mockResolvedValue({ ok: true, value: false });
     const owners: SessionHistoryWorkerDatabase[] = [];
-    for (const lane of [historyLane, maintenanceLane]) {
+    for (const lane of [historyLane, projectionLane, maintenanceLane]) {
       await withSessionHistoryWorkerDatabase(
         request.database,
         async (owner) => {
@@ -159,18 +161,25 @@ it.each([false, true])(
     const resource = observed.resources[0]!;
     const retained = pending ? retainSessionHistoryWorkerDatabase(request.database) : undefined;
     const foreground = createDeferredCore();
+    const projection = createDeferredCore();
     const maintenance = createDeferredCore();
     const cleanup = pending || process.versions.bun ? observed.rotate : observed.closeResources;
-    cleanup.mockReturnValueOnce(foreground.promise).mockReturnValueOnce(maintenance.promise);
+    cleanup
+      .mockReturnValueOnce(foreground.promise)
+      .mockReturnValueOnce(projection.promise)
+      .mockReturnValueOnce(maintenance.promise);
     resource.revoke();
     retained?.release();
     for (const owner of owners) {
       expect(owner.assertCurrent).toThrow("revoked");
     }
     const closing = resource.close();
-    expect(cleanup).toHaveBeenCalledTimes(2);
+    expect(cleanup).toHaveBeenCalledTimes(3);
     foreground.resolve();
     await foreground.promise;
+    expect(observed.unregister).not.toHaveBeenCalled();
+    projection.resolve();
+    await projection.promise;
     expect(observed.unregister).not.toHaveBeenCalled();
     maintenance.resolve();
     await closing;
