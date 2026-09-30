@@ -28,7 +28,9 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
 - Apply a release firebreak after the Code SHA is frozen. Admit only confirmed
   product defects, wrong or unverifiable package bytes, security
   defects, or failures that make publication impossible. Queue other findings
-  for postpublish confidence or the next beta.
+  for postpublish confidence or the next beta. Dependency advisories are never
+  firebreak admissions: record them as release evidence and queue the bump on
+  `main` after publication; only known malware stops publication.
 - Frozen CI children use the pinned Tooling SHA's Node shard planner and measured
   costs, while discovering and executing tests from the candidate checkout.
   Hosted full-release plans split measured rows above 12 minutes; preserve file
@@ -46,9 +48,12 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   mint or reuse that tag from `--workflow-sha <tooling-sha>`.
 - Touch `main` only for an operator-requested change or the smallest critical
   main-owned blocker that prevents this release and cannot be handled from the
-  release branch. If the required main landing policy is blocked by unrelated
-  main failures, report that blocker and keep independent release work moving
-  instead of healing broader main.
+  release branch. Main's CI health never gates a release. If a release-tooling
+  landing is blocked by `main` failures it does not cause, prove on a clean
+  `main` checkout that the failure already exists there, record it in the PR
+  body, and merge; during an active release an admin merge is allowed for that
+  exact case. A separate lane fixes red `main` in parallel, off the release's
+  critical path.
 - Land tooling-only fixes on `main` with the `release-fast-lane` label added
   before the push (see [Release tooling fast lane](#release-tooling-fast-lane)): `openclaw/ci-gate`
   then runs lint, types, guards, dependencies, docs, and the changed Node rows
@@ -63,7 +68,9 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   caller group; PR/main CI and unrelated scheduled work remain outside it.
 - Validate provider secrets before dispatching expensive full release matrices.
 - Check the nightly parent for the Code SHA before dispatching a fresh main validation; it seals per-child receipts that exact-target dispatches adopt when inputs match. The nightly runs this helper route (`--sha <main-sha> --workflow-sha <main-sha>`), so its parent runs on a `release-ci/<sha12>-<id>` branch, not `main`.
-- Every selected validation lane must pass. Stable tags require stable/full
+- Every selected validation lane must pass except the policy-owned
+  `windows-node-ci` class in FRV's `normalCi` child; see
+  [Publication requirements](#publication-requirements). Stable tags require stable/full
   evidence, soak, and blocking performance. Beta-profile evidence cannot qualify
   stable. No lane or soak waiver bypasses these requirements. All-group
   qualification requires all nine Linux/Windows/macOS Gateway install/upgrade
@@ -250,7 +257,7 @@ until their dependent enforcement changes land.
   release branch or beta tag records `coveragePolicy=npm-beta-v1`. It keeps
   Linux/macOS/Windows Node, Control UI, plugin, package, install/update,
   Linux/Windows/macOS cross-OS, QA parity, runtime-pair/restart, and tool coverage.
-  All selected tests gate npm/ClawHub. Native app
+  All selected tests except `windows-node-ci` gate npm/ClawHub. Native app
   CI, performance, and published-package Telegram are deferred to confidence.
   Beta `all` without soak also defers Package Acceptance Telegram, including
   beta-profile checks of `main`. Record deferred checks as not run,
@@ -268,9 +275,11 @@ until their dependent enforcement changes land.
 - Recover one failed surface with one diagnosis, one fix when needed, and one
   narrow retry. Then reassess the release decision. Do not automatically
   dispatch `rerun_group=all`.
-- Never automatically rerun a failed or timed out test job. New dispatches reject
-  `known_flaky_jobs_json`; diagnose the original failure and fix its owner before
-  explicit operator recovery.
+- Rerun a failed or timed out test job only after the lead records its
+  real-blocker-or-flake decision (see the maintainer skill's shared release
+  boundaries). A flake gets at most two recorded reruns on the same Release SHA
+  plus a fix-in-parallel issue or PR on `main`; never a re-cut, tooling change,
+  or new FRV. New dispatches reject `known_flaky_jobs_json`.
 - For a supported parent, `pnpm frv rerun --run <parent-run-id> --job
 "<child-key>:<exact job name>"` reruns one executed terminal job using its accepted
   Actions job ID. Get the child key and exact name from `frv status --json`.
@@ -404,12 +413,18 @@ trusted workflow tooling. The receipt retains normalized dispatch inputs,
 including candidate descriptors, and composes predecessor jobs across attempts.
 Its `workloadConclusion` excludes the running publisher. Collection failure
 loses reuse metadata without changing workload qualification. With
-`reuse_evidence=true`, dispatch checks at most 30 recent runs and five receipts
-per role within two minutes. It can adopt green children from failed, cancelled,
-or active parents for the exact target, inputs/defaults, and candidate descriptor
-bytes; unmatched roles dispatch fresh work. The current-parent adoption witness
+`reuse_evidence=true`, dispatch scans at most 100 recent runs, probes at most 40
+target receipt inventories, and fully validates at most five matching receipts
+per role within two minutes. Other-target and other-tooling runs do not spend
+the full-validation budget. Empty-string inputs equal absent inputs because GitHub omits them from
+`github.event.inputs`; non-empty defaults and candidate descriptor bytes must
+match exactly. It can adopt green children from failed, cancelled, or active
+parents only at the same Tooling SHA as the current parent, still requiring main
+ancestry. Missing or different parent tooling fails closed; no paths are exempt.
+Dispatch logs identify reused children, explain each evaluated rejection, and
+summarize skipped runs and fresh dispatches. The current-parent adoption witness
 and immutable execution plan bind each selection. Collectors and final verification
-recheck the live child attempt and conclusion, main ancestry, exact inputs,
+recheck the live child attempt and conclusion, same tooling, main ancestry, inputs,
 artifact identity/digest/expiry, and successful trusted seal/upload steps. A newer
 attempt invalidates reuse; do not rerun an adopted child to repair a collector.
 Current-parent source/publication admission and the separate successful-parent
@@ -549,8 +564,19 @@ Mutation owners recheck live publication authority, selectors, and immutable byt
 
 Publish with `release_profile=from-validation` to consume the sealed profile.
 Stable publication requires stable/full evidence, soak, and blocking performance.
-Every selected validation lane must succeed, including first-hop compatibility,
-Telegram, and Linux/Windows/macOS Gateway checks. No lane or soak waiver applies.
+Windows Node unit-test CI shards (`checks-windows-node-*`) in the normal CI child
+(`normalCi`) are advisory for Release Decision and publication. The named
+`windows-node-ci` class belongs to `scripts/full-release-validation-policy.mjs`.
+Its failures stay visible in the decision, GitHub step summary, and release
+evidence manifest; validators and publish gates recheck the class and child.
+This is policy-derived, never an operator input or waiver. Ordinary PR, push,
+scheduled, and main CI keep Windows blocking.
+
+Every other selected validation lane must succeed: macOS Node and other normal
+CI jobs, install smoke, survivor lanes, `update-first-hop-compat*`, pack/npm
+qualification, package integrity, Telegram, and Linux/Windows/macOS Gateway
+checks, including Windows packaged install/upgrade checks in Release Checks.
+A cancelled run still blocks. No lane or soak waiver applies.
 
 ### Publish children
 
@@ -776,7 +802,8 @@ Interpret state precisely:
   remained active.
 
 Read every selected lane's actual conclusion. `passed` requires all selected
-validation lanes to succeed; omitted coverage is not run, never passed.
+validation lanes outside `windows-node-ci` to succeed and retains the advisory
+failures; omitted coverage is not run, never passed.
 
 The `full-release-diagnostics-<run-id>-<attempt>` artifact is the terminal
 failure and timing manifest. Use it after an early blocker instead of
@@ -827,7 +854,15 @@ run-ID-cached bytes first.
      `ClawHub dispatch blocked by waiting run`: see [Publish children](#publish-children)
      Only the first class changes the Code SHA. After one diagnosis/fix/narrow
      retry, reassess instead of starting another all-group cycle.
-7. If a required PR CI run is capacity-stalled with queued jobs and no active
+7. Runner routing: FRV-dispatched CI and Plugin Prerelease children always run
+   hosted `ubuntu-24.04` (or the release runner group). Other release lanes
+   follow `OPENCLAW_CI_RUNNER_BACKEND`, so a flip to `github` during a Blacksmith
+   outage moves them to hosted runners, except the QA Lab runtime-pair lane: it
+   fails on hosted runners and stays pinned to Blacksmith, queuing through an
+   outage. Release Checks prints a `Release runner routing` notice while the
+   flip is active. Codex extension tests run as file-bounded Plugin Prerelease
+   jobs because one hosted Codex batch took 36-60 minutes.
+8. If a required PR CI run is capacity-stalled with queued jobs and no active
    jobs, do not cancel unrelated work or accept a generic manual dispatch.
    First verify the PR head carries the current fallback schema:
    `gh api 'repos/openclaw/openclaw/contents/.github/workflows/ci.yml?ref=<pr-head-branch>'
