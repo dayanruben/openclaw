@@ -69,7 +69,7 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
 - Validate provider secrets before dispatching expensive full release matrices.
 - Check the nightly parent for the Code SHA before dispatching a fresh main validation; it seals per-child receipts that exact-target dispatches adopt when inputs match. The nightly runs this helper route (`--sha <main-sha> --workflow-sha <main-sha>`), so its parent runs on a `release-ci/<sha12>-<id>` branch, not `main`.
 - Every selected validation lane must pass except the policy-owned
-  `windows-node-ci` class in FRV's `normalCi` child; see
+  `windows-node-ci` and authenticated `recorded-flake` classes in FRV's `normalCi` child; see
   [Publication requirements](#publication-requirements). Stable tags require stable/full
   evidence, soak, and blocking performance. Beta-profile evidence cannot qualify
   stable. No lane or soak waiver bypasses these requirements. All-group
@@ -81,7 +81,8 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   pending platforms accurately and repair native-only failures in parallel.
 - Do not set GitHub secrets from unvalidated 1Password candidates. If a candidate returns 401/403, leave the existing secret alone and report the exact missing provider.
 - Use `$one-password` for secret reads/writes: one persistent tmux session, targeted items only, no secret output.
-- Watch one parent run plus compact child summaries. Avoid broad `gh run view` polling loops; REST quota is easy to burn.
+- Watch one parent run with `pnpm frv watch --run <parent>` (see [Watch](#watch)).
+  Avoid broad `gh run view` polling loops; REST quota is easy to burn.
 - Fetch logs only for failed or currently-blocking jobs. If quota is low, stop polling and wait for reset.
 - Treat live-provider flakes separately from code failures: prove key validity, provider HTTP status, retry evidence, and exact failing lane before editing code.
 - A model-list response proves authentication, not billing or inference
@@ -125,7 +126,7 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   temporarily returns duplicate jobs in the newest retry attempt. The run tuple
   and attempt stay pinned; persistent duplicates and older-attempt conflicts
   remain errors.
-- Use `pnpm frv status|rerun --job|continue --failed|verify` for attempt-aware recovery.
+- Use `pnpm frv status|watch|rerun --job|rerun --child|continue --failed|verify` for attempt-aware recovery.
   The controller is stateless: the immutable execution plan, exact GitHub run
   attempts, Diagnostic Drain, and final manifest are the only authorities. It
   never writes a tag, package, registry entry, release candidate, or
@@ -146,7 +147,7 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   strict-verifier invocation. Never use a real Full Release Validation run for
   this proof. See
   [Full Release Validation](/reference/full-release-validation#post-merge-continuation-proof).
-- Use one release operator, one transition-only watcher, and at most one
+- Use one release operator, one `frv watch`, and at most one
   investigator for the current failed surface. Do not build audit-review-plan
   trees around a single workflow transition.
 - For regular beta/stable releases, Code SHA may already contain final notes
@@ -186,9 +187,9 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
 
 Release validation does not pause CI or supporting workflows. The legacy
 `OPENCLAW_RELEASE_PRIORITY_RUN` variable is ignored by current workflow
-admission. Do not use `pnpm frv prioritize --run` for routine validation;
-it still cancels queued runs. Use `pnpm frv prioritize --restore <record>`
-to recover runs deferred by older workflow revisions and clear their variable.
+admission, and `pnpm frv prioritize --run` is retired. Use
+`pnpm frv prioritize --restore <record>` to recover runs deferred by older
+workflow revisions and clear their variable.
 Keep the required publication proofs and soak gates intact.
 
 ## Continuous release readiness
@@ -257,7 +258,7 @@ until their dependent enforcement changes land.
   release branch or beta tag records `coveragePolicy=npm-beta-v1`. It keeps
   Linux/macOS/Windows Node, Control UI, plugin, package, install/update,
   Linux/Windows/macOS cross-OS, QA parity, runtime-pair/restart, and tool coverage.
-  All selected tests except `windows-node-ci` gate npm/ClawHub. Native app
+  All selected tests except `windows-node-ci` and bound `recorded-flake` jobs gate npm/ClawHub. Native app
   CI, performance, and published-package Telegram are deferred to confidence.
   Beta `all` without soak also defers Package Acceptance Telegram, including
   beta-profile checks of `main`. Record deferred checks as not run,
@@ -285,6 +286,18 @@ until their dependent enforcement changes land.
   Actions job ID. Get the child key and exact name from `frv status --json`.
   GitHub also reruns dependent jobs. The controller waits only for that child
   before sending the request; it does not retry unrelated failures.
+- `pnpm frv rerun --run <parent-run-id> --child <child-key|run-id>
+[--max-attempts N]` records one of those bounded reruns. It waits for the
+  child to finish, sends exactly one rerun-failed-jobs request, and returns once
+  the new attempt exists without duplicate jobs. Before the request it prints
+  each failed job's runner labels and the current `OPENCLAW_CI_RUNNER_BACKEND`;
+  afterwards it appends an audit line to
+  `$TMPDIR/openclaw-frv/<repo>-<parent>-reruns.jsonl`. It refuses a passed
+  child, an artifact producer (use `continue --failed`), and a child past its
+  attempt budget: the default 2 allows one rerun; pass `--max-attempts 3` only
+  for a recorded flake. When a failed consumer binds a green producer's run
+  attempt (the install-smoke candidate payload, #161317), it reruns that
+  producer job and its dependents instead. Reseal with `continue --failed`.
 - `pnpm frv continue --failed --run <parent-run-id>` reruns each failed child
   as soon as it is terminal, even while the parent or siblings remain active.
   It adopts active attempts and preserves green children. Once every required
@@ -572,11 +585,24 @@ evidence manifest; validators and publish gates recheck the class and child.
 This is policy-derived, never an operator input or waiver. Ordinary PR, push,
 scheduled, and main CI keep Windows blocking.
 
-Every other selected validation lane must succeed: macOS Node and other normal
-CI jobs, install smoke, survivor lanes, `update-first-hop-compat*`, pack/npm
+Decide blocker or flake for every failed test. Rerun flakes on the same Release
+SHA at most twice, file a fix-in-parallel issue/PR on `main`, and record eligible
+still-failing `normalCi` jobs through `full-release-flake-classification.yml` on
+trusted `main`. The `recorded-flake` receipt binds the parent, child, exact job
+attempt, target SHA, actor, reason, and tracking link. Keep that failure visible;
+never re-cut, change tooling, or start a new FRV for a flake. After the receipt
+succeeds, `frv continue --failed` reseals only the parent when no blockers remain.
+See [operator flow](../../../docs/reference/full-release-validation/continuation.md#record-a-flake).
+
+Other children stay strict in v1; extending classification is follow-up work.
+Never classify CI coverage gates, seal/evidence, Build Artifacts, install smoke,
+survivor lanes, `update-first-hop-compat*`, pack/npm
 qualification, package integrity, Telegram, and Linux/Windows/macOS Gateway
 checks, including Windows packaged install/upgrade checks in Release Checks.
-A cancelled run still blocks. No lane or soak waiver applies.
+A failed CI gate needs at least one recorded flake, every other failed job to be
+advisory, and log proof that each non-passing entry is selected and failed.
+Matrix display names may differ from gate keys. Skipped, cancelled, missing,
+and unknown coverage blocks. No lane or soak waiver applies.
 
 ### Publish children
 
@@ -617,15 +643,28 @@ for publication ordering and prepared/direct recovery.
   (`plugin-clawhub-new.yml`) always wait on `clawhub-plugin-bootstrap`. Approve
   them after the secretless pack jobs finish
   ([first package](../release-openclaw-maintainer/references/first-package.md)).
-- Before every child dispatch the parent sweeps a failed earlier parent's
+- A v2 ClawHub child can stage most packages before one failure makes the
+  awaited parent fail, preventing finalization of the staged siblings.
+  Reconcile the original child's `*-publish-json` artifacts before any
+  republish or parent resume. Use
+  `pnpm release:clawhub-recovery -- --version <version> --reason '<parent failure>' --clawhub-source <isolated pinned ClawHub checkout> <package-publish.json>...`
+  to print exact attempt recovery commands; see the publication recovery guide
+  for the pinned source CLI and authorized execution. Public version 404s do
+  not distinguish staged from missing, and attempt status needs publisher
+  authentication. Parent receipts and live-authority revalidation remain
+  required; recovery does not turn a failed parent into successful evidence.
+- Before the first child dispatch the parent sweeps all selected publishers for a failed earlier parent's
   `waiting`/`queued` children of the same release (ClawHub and core by the
   `parent=<run>/<attempt>` run title; plugin npm by the release SHA, only
   while no other publish parent is live): it
-  rejects their gate, cancels, and waits up to 5 minutes for GitHub to report
-  them cancelled (a waiting run takes ~2 minutes). A parent failure also
-  cancels its own waiting npm children. Only legacy children without a parent
-  identity in their title, or a live publisher job, still block with
-  `ClawHub dispatch blocked by waiting run`; sweep those by hand. List
+  attempts gate rejection and cancellation, then waits up to 5 minutes per workflow.
+  Rejection denied with 403 needs a reviewer; logs and the step summary include
+  the reject/cancel commands. Unconfirmed cancellation warns. Core npm has an
+  independent publish slot and rechecks its live parent, so it does not block;
+  plugin npm and ClawHub retain target-serialized slots and refuse before any
+  new dispatch if cancellation remains unconfirmed. Legacy unidentified ClawHub
+  children or live publishers also retain the dispatch guard. A parent failure
+  cancels its own waiting npm children. To clean up as a reviewer, list
   `workflow_dispatch` runs by `github-actions[bot]` created for this release,
   reject their gate, cancel:
   ```bash
@@ -756,7 +795,25 @@ them requires a new request, never continuation.
 
 ## Watch
 
-Use the transition-only summary watcher instead of repeated raw polling:
+Watch children with the attempt-aware controller:
+
+```bash
+pnpm frv watch --run <full-release-run-id>
+```
+
+It resolves child run IDs from the parent's dispatch-job log lines
+(`Dispatched <workflow>: <url> (attempt N)`), never from display titles, and
+reports each parent and child attempt transition and each failed job once, with
+runner labels and advisory Windows jobs marked. Transient GitHub 5xx or HTML
+error bodies are retried on the next poll, never reported as job results.
+State lives in `$TMPDIR/openclaw-frv/<repo>-<parent>-watch.json` (`--state`
+overrides), so a restart after a harness or Monitor timeout does not re-report.
+`--once` takes one snapshot, `--interval <seconds>` sets polling (default 60),
+and `--json` prints NDJSON. It exits once the parent and every dispatched child
+are terminal; restart it after a later rerun. Do not hand-roll bash or `gh`
+watchers.
+
+For the parent's Release Decision, use the transition-only summary watcher:
 
 ```bash
 node scripts/release-ci-summary.mjs <full-release-run-id> --watch
@@ -802,7 +859,8 @@ Interpret state precisely:
   remained active.
 
 Read every selected lane's actual conclusion. `passed` requires all selected
-validation lanes outside `windows-node-ci` to succeed and retains the advisory
+validation lanes outside `windows-node-ci` and authenticated `recorded-flake`
+jobs to succeed and retains the advisory
 failures; omitted coverage is not run, never passed.
 
 The `full-release-diagnostics-<run-id>-<attempt>` artifact is the terminal
@@ -815,18 +873,17 @@ run-ID-cached bytes first.
 ## Failure Triage
 
 1. Confirm parent SHA and child run IDs.
-2. List failed jobs only:
-   ```bash
-   gh run view <child-run-id> --repo openclaw/openclaw --json jobs \
-     --jq '.jobs[] | select(.conclusion=="failure" or .conclusion=="timed_out" or .conclusion=="cancelled") | [.databaseId,.name,.conclusion,.url] | @tsv'
-   ```
+2. List failed jobs with `pnpm frv watch --run <parent> --once`; it prints each
+   failed job with its attempt, runner labels, and URL.
 3. Fetch one failed job log. If rate-limited, note reset time and avoid more REST calls.
 4. For secret-looking failures, validate a real completion from the same secret source before editing code. A successful model-list request is insufficient.
    Claude CLI subscription credentials are a separate native auth path; prove
    them in a clean-home CLI probe, never as a substitute for a required
    Anthropic API-key lane.
 5. For live-cache failures, inspect whether it is missing/invalid key, empty text, provider refusal, timeout, or baseline miss. Do not weaken release gates without clear provider evidence.
-6. Classify before editing:
+6. Decide blocker or flake for each failed test before editing. Flakes use
+   [recorded classification](#publication-requirements) and a fix on `main`;
+   classify blockers further:
    - confirmed product/code failure: fix the release branch, freeze a new Code
      SHA, and invalidate product evidence
    - harness, tooling, or source mismatch: keep the Code SHA, fix the smallest
