@@ -16,6 +16,8 @@ import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-rea
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
 import { resolveUserPath } from "./home-dir.js";
 import { migrationFileExists } from "./state-migrations.fs.js";
+import { listRetiredDeliveryQueueFiles } from "./state-migrations.retired-delivery-files.js";
+import { assertNoRetiredStateFiles } from "./state-migrations.retired-files.js";
 import type { MigrationLogger } from "./state-migrations.types.js";
 
 let autoMigrateStateDirChecked = false;
@@ -305,11 +307,11 @@ export function prepareLegacyStateDirMigration(params: StateDirMigrationParams) 
   if (autoMigrateStateDirChecked) {
     return undefined;
   }
-  autoMigrateStateDirChecked = true;
   const result = migrateLegacyStateDirRoot(params);
+  autoMigrateStateDirChecked = true;
   return {
     stateDir: resolveStateDir(params.env ?? process.env, params.homedir ?? os.homedir),
-    complete: () => Promise.resolve(result),
+    result,
   };
 }
 
@@ -317,9 +319,7 @@ export async function autoMigrateLegacyStateDir(
   params: StateDirMigrationParams,
 ): Promise<StateDirMigrationResult> {
   const prepared = prepareLegacyStateDirMigration(params);
-  return prepared
-    ? prepared.complete()
-    : { migrated: false, skipped: true, changes: [], warnings: [] };
+  return prepared ? prepared.result : { migrated: false, skipped: true, changes: [], warnings: [] };
 }
 
 function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMigrationResult {
@@ -330,6 +330,7 @@ function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMig
   const notices: string[] = [];
   const hasCustomStateDir = Boolean(env.OPENCLAW_STATE_DIR?.trim());
   const targetDir = hasCustomStateDir ? resolveStateDir(env, homedir) : resolveNewStateDir(homedir);
+  assertNoRetiredStateFiles("JSON delivery queues", listRetiredDeliveryQueueFiles(targetDir));
   const finishMigration = (): StateDirMigrationResult => {
     const legacyIndexPath = resolveLegacyInstalledPluginIndexStorePath({ stateDir: targetDir });
     if (migrationFileExists(legacyIndexPath)) {
@@ -409,6 +410,7 @@ function migrateLegacyStateDirRoot(params: StateDirMigrationParams): StateDirMig
     return { migrated: false, skipped: false, changes, warnings };
   }
 
+  assertNoRetiredStateFiles("JSON delivery queues", listRetiredDeliveryQueueFiles(legacyDir));
   if (safeStatSync(targetDir)?.isDirectory()) {
     if (isLegacyDirSymlinkMirror(legacyDir, targetDir)) {
       return finishMigration();

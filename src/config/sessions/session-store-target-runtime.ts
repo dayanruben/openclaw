@@ -1,14 +1,17 @@
+import { isDeepStrictEqual } from "node:util";
+import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
 import {
   AgentDatabaseRegistryChangedError,
   prepareOpenClawAgentDatabaseRegistrySnapshotRead,
   type AgentDatabaseRegistryChange,
 } from "../../state/openclaw-agent-db-registry-listing.js";
 import { assertSessionStoreReadCandidate } from "./session-store-read-candidates.js";
-import type {
-  SessionStoreTargetInventoryRequest,
-  SessionStoreTargetInventoryResult,
-  SessionStoreTargetReadRequest,
-  SessionStoreTargetReadResult,
+import {
+  createSessionStoreRegistryMutationFilter,
+  type SessionStoreTargetInventoryRequest,
+  type SessionStoreTargetInventoryResult,
+  type SessionStoreTargetReadRequest,
+  type SessionStoreTargetReadResult,
 } from "./session-store-target-inventory.js";
 import {
   withSessionHistoryWorkerReadCandidates,
@@ -23,15 +26,39 @@ type StoreTargetReadOwner = {
   revalidateTarget: () => Promise<void>;
 };
 
+function prepareSessionStoreRegistryRead(
+  request: Pick<SessionStoreTargetInventoryRequest, "env" | "candidates" | "registryDiscovery">,
+  unchangedBy?: Parameters<typeof prepareOpenClawAgentDatabaseRegistrySnapshotRead>[1],
+) {
+  return prepareOpenClawAgentDatabaseRegistrySnapshotRead(
+    { env: request.env },
+    unchangedBy ??
+      createSessionStoreRegistryMutationFilter({
+        captured: request.candidates.map((candidate) => {
+          const identity = readDatabasePathIdentitySync(candidate.path);
+          return { candidate, identity: identity.key, birthtime: identity.birthtime };
+        }),
+        preparedSources: [],
+        registryDiscovery: request.registryDiscovery,
+      }),
+  );
+}
+
 /** Capture registry admission now; retain its witness independently of discovery custody. */
 export function prepareSessionStoreTargetInventoryRead(
   request: Omit<SessionStoreTargetInventoryRequest, "registeredDatabases">,
+  unchangedBy?: Parameters<typeof prepareOpenClawAgentDatabaseRegistrySnapshotRead>[1],
 ) {
   const { candidates, ...prepared } = request;
-  const registry = prepareOpenClawAgentDatabaseRegistrySnapshotRead({ env: request.env });
+  const registry = prepareOpenClawAgentDatabaseRegistrySnapshotRead(
+    { env: request.env },
+    unchangedBy,
+  );
   let registryStarted = false;
   const assertRegistryCurrent = () => {
-    if (registryStarted) {
+    // Explicit publication scopes retain their witness before discovery; other
+    // inventories depend on registry currency only after requesting its rows.
+    if (registryStarted || unchangedBy) {
       registry.assertCurrent();
     }
   };
@@ -86,17 +113,14 @@ export async function withSessionStoreTarget<T>(
 ): Promise<T> {
   assertCallerCurrent?.();
   const { candidates, ...targetRequest } = request;
-  const registryRead = prepareOpenClawAgentDatabaseRegistrySnapshotRead({ env: targetRequest.env });
+  let registryRead = prepareSessionStoreRegistryRead(request);
   return withSessionHistoryWorkerReadCandidates(
     candidates,
     async (discovery) => {
-      let registryStarted = false;
       const assertDiscoveryCurrent = () => {
         assertCallerCurrent?.();
         discovery.assertCurrent();
-        if (registryStarted) {
-          registryRead.assertCurrent();
-        }
+        registryRead.assertCurrent();
       };
       const failedRead = async (error: unknown): Promise<T> => {
         assertDiscoveryCurrent();
@@ -115,12 +139,9 @@ export async function withSessionStoreTarget<T>(
       let resolved = read.value;
       let registry: Awaited<ReturnType<typeof registryRead.read>> | undefined;
       if (resolved.kind === "session-target-registry-required") {
-        registryStarted = true;
         registryRead.assertCurrent();
         registry = await registryRead.read();
-        registry.assertCurrent();
-        discovery.assertCurrent();
-        assertCallerCurrent?.();
+        assertDiscoveryCurrent();
         read = await discovery.readStoreTargetResult({
           ...targetRequest,
           registeredDatabases:
@@ -136,7 +157,6 @@ export async function withSessionStoreTarget<T>(
           throw new Error("Session store target requested registry rows twice");
         }
       }
-      registry?.assertCurrent();
       const target = resolved;
       const assertSourceCurrent = () => {
         assertCallerCurrent?.();
@@ -145,13 +165,13 @@ export async function withSessionStoreTarget<T>(
       };
       const assertCurrent = () => {
         assertSourceCurrent();
-        assertDiscoveryCurrent();
-        registry?.assertCurrent();
+        registryRead.assertCurrent();
       };
       let registrationChanged = false;
       const verifyCurrentTarget = async (assertRetainedCurrent: () => void) => {
         assertRetainedCurrent();
-        const currentRegistry = await registryRead.read();
+        const currentRead = prepareSessionStoreRegistryRead(request);
+        const currentRegistry = await currentRead.read();
         assertRetainedCurrent();
         currentRegistry.assertCurrent();
         const current = await discovery.readStoreTargetResult({
@@ -166,15 +186,10 @@ export async function withSessionStoreTarget<T>(
         }
         assertRetainedCurrent();
         currentRegistry.assertCurrent();
-        if (
-          current.value.kind !== "session-store-target" ||
-          current.value.logicalAgentId !== target.logicalAgentId ||
-          current.value.sourcePath !== target.sourcePath ||
-          current.value.database.agentId !== target.database.agentId ||
-          current.value.database.path !== target.database.path
-        ) {
+        if (!isDeepStrictEqual(current.value, target)) {
           throw new Error("Session store registration changed its selected target");
         }
+        registryRead = currentRead;
         registry = currentRegistry;
         registrationChanged = false;
       };
@@ -204,10 +219,9 @@ export async function withSessionStoreTarget<T>(
         },
         async revalidateTarget() {
           assertCurrent();
-          if (!registrationChanged) {
-            return;
+          if (registrationChanged) {
+            await verifyCurrentTarget(assertCurrent);
           }
-          await verifyCurrentTarget(assertCurrent);
         },
       });
       if (registrationChanged) {
