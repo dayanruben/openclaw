@@ -611,6 +611,7 @@ src/config/sessions/session-mutation-conflict-error.ts
 src/config/sessions/session-pending-input-custody-error.ts
 src/config/sessions/session-pending-input-operations.types.ts
 src/config/sessions/session-transcript-writer-claim-error.ts
+src/config/sessions/session-source-authority.ts
 src/config/sessions/session-sqlite-target-paths.ts
 src/config/sessions/session-sqlite-target.ts
 src/config/sessions/session-store-config.ts
@@ -1727,6 +1728,9 @@ src/state/session-watch-cursor-provenance.ts
 src/state/worker-operation-registry.ts
 src/system-agent/agent-id.ts
 src/test-utils/bun-process.ts
+src/trajectory/paths.ts
+src/trajectory/runtime-retention.sqlite.ts
+src/trajectory/runtime-retention.worker.ts
 src/utils.ts
 src/utils/absolute-deadline.ts
 src/utils/boolean.ts
