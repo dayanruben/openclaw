@@ -1,7 +1,8 @@
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import {
-  selectAcpSessionRowForRead,
+  acpSessionRowMatchesEntry,
   selectAcpSessionRows,
+  selectAcpSessionRowsByKeys,
 } from "../acp/runtime/session-meta-keys.js";
 import {
   loadSubagentMaintenanceRunsInDatabase,
@@ -36,7 +37,10 @@ import {
   readKnownRepositoryGitHubPublicationPullRequestUrlsInDatabase,
   readRepositoryGitHubPublicationInDatabase,
 } from "../gateway/github-repository-publication-store.js";
-import { listCronStandingGrantsInDatabase } from "../gateway/operator-approval-standing-grants.js";
+import {
+  listCronStandingGrantsInDatabase,
+  lookupCronStandingGrantInDatabase,
+} from "../gateway/operator-approval-standing-grants.js";
 import { listTerminalOperatorApprovalsInDatabase } from "../gateway/operator-approval-store.kernel.js";
 import { readSessionGroupCatalogSnapshot } from "../gateway/session-group-catalog.kernel.js";
 import { readSessionGroupMembership } from "../gateway/session-group-membership.read.js";
@@ -44,18 +48,20 @@ import {
   readWorkerPlacementRecoveryCandidatesInDatabase,
   readWorkerSessionPlacementProjectionInDatabase,
 } from "../gateway/worker-environments/placement-read-projection.js";
-import { readWorkerPlacementChangeSnapshotInDatabase } from "../gateway/worker-environments/placement-row-codec.js";
+import {
+  readWorkerPlacementChangeSnapshotInDatabase,
+  readWorkerPlacementsForReconcileInDatabase,
+} from "../gateway/worker-environments/placement-row-codec.js";
 import { readWorkspaceJournalInDatabase } from "../gateway/worker-environments/placement-workspace-journal.js";
 import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/placement-workspace-journal.types.js";
 import { listPendingWorkerWorkspaceResultsInDatabase } from "../gateway/worker-environments/placement-workspace-result.js";
 import { getSqliteRuntimeCapabilities } from "../infra/bun-sqlite-library.js";
 import { executeDevicePairingRead } from "../infra/device-pairing-read.kernel.js";
 import { readExecApprovalsConfigRow } from "../infra/exec-approvals-sqlite.js";
-import { readGatewayOwnerLeaseFromDatabase } from "../infra/gateway-owner-lease.read.js";
+import { inspectGatewayOwnerLeaseForMaintenance } from "../infra/gateway-owner-lease.worker.js";
 import { bunSqliteNativeCleanupPending } from "../infra/node-sqlite.js";
 import { inspectCurrentConversationBindingRecordInDatabase } from "../infra/outbound/current-conversation-bindings.kernel.js";
 import { readOutboundDeliveriesInDatabase } from "../infra/outbound/delivery-queue-storage.kernel.js";
-import { getAdmittedSqliteSchemaFacts } from "../infra/sqlite-schema-facts.js";
 import { runSqliteDeferredTransactionSync } from "../infra/sqlite-transaction.js";
 import { runWithSqliteWorkerStateContext } from "../infra/sqlite-worker-state-context.js";
 import {
@@ -82,12 +88,14 @@ import { isTuiLastSessionReadCommand } from "../tui/tui-last-session.contract.js
 import { readTuiLastSessionCommand } from "../tui/tui-last-session.kernel.js";
 import { readAgentDatabaseDeletionSnapshotInDatabase } from "./agent-deletion-journal.read.js";
 import { readBackupRunsInDatabase } from "./backup-run-records.kernel.js";
-import { readConfigMachineStateRowInDatabase } from "./config-machine-state.js";
+import {
+  isConfigMachineStateReadCommand,
+  readConfigMachineStateCommandInDatabase,
+} from "./config-machine-state.js";
 import { readGitHubPublicationSessionLifecycle } from "./github-publication-session-lifecycles.js";
 import { readOnboardingRecommendationsInDatabase } from "./onboarding-recommendations.kernel.js";
 import { readRegisteredAgentDatabaseRows } from "./openclaw-agent-db-registry.read.js";
 import { openClawStateDatabaseCache } from "./openclaw-state-db-cache.js";
-import { openDoctorStateSchemaReadAdmission } from "./openclaw-state-db-doctor-schema.js";
 import {
   closeRetainedOpenClawStateReadConnections,
   readOpenClawStateReadOnlyLocation,
@@ -155,12 +163,16 @@ serveOwnedWorkerTasks(
         if (command.type === "admit") {
           return { ok: true, type: "admit" };
         }
+        if (command.type === "doctor.gatewayOwnerLease.read") {
+          const lease = inspectGatewayOwnerLeaseForMaintenance(input, () => {
+            sourceAdmitted = true;
+          });
+          return { ok: true, type: command.type, sourceAdmitted: true, lease };
+        }
         const locationArgs = [
           input.databasePath,
           input.location,
-          command.type === "doctor.gatewayOwnerLease.read"
-            ? openDoctorStateSchemaReadAdmission
-            : undefined,
+          undefined,
           input.expectedIdentity,
           input.snapshotRoot,
           true,
@@ -227,9 +239,6 @@ serveOwnedWorkerTasks(
                     : undefined,
               };
             }
-            if (command.type === "doctor.gatewayOwnerLease.read") {
-              return { type: command.type, lease: readGatewayOwnerLeaseFromDatabase(db) };
-            }
             if (command.type === "agentDatabaseDeletion.snapshot") {
               return {
                 type: command.type,
@@ -259,9 +268,22 @@ serveOwnedWorkerTasks(
               };
             }
             if (command.type === "acpSessions.metadata") {
+              const cohortKeys = [...new Set(command.entries.flatMap((entry) => entry.keys))];
+              const rows = new Map(
+                [...selectAcpSessionRowsByKeys(db, cohortKeys)].map((row) => [
+                  row.session_key,
+                  row,
+                ]),
+              );
               return {
                 type: command.type,
-                rows: command.entries.map((entry) => selectAcpSessionRowForRead(db, entry) ?? null),
+                rows: command.entries.map(
+                  ({ keys, entry }) =>
+                    keys
+                      .map((key) => rows.get(key))
+                      .find((row) => row && (!entry || acpSessionRowMatchesEntry(row, entry))) ??
+                    null,
+                ),
               };
             }
             if (isChannelIngressReadCommand(command)) {
@@ -462,6 +484,12 @@ serveOwnedWorkerTasks(
                 history: listTerminalOperatorApprovalsInDatabase(command.input, db),
               };
             }
+            if (command.type === "operatorApprovals.validateCronGrant") {
+              return {
+                type: command.type,
+                result: lookupCronStandingGrantInDatabase(db, command.input, false),
+              };
+            }
             if (command.type === "operatorApprovals.listCronGrants") {
               return {
                 type: command.type,
@@ -474,16 +502,8 @@ serveOwnedWorkerTasks(
                 record: readOnboardingRecommendationsInDatabase(db, command.configKey),
               };
             }
-            if (command.type === "nodeHost.config" || command.type === "operator.channelPolicy") {
-              return {
-                type: command.type,
-                // Activation may precede deferred publication; never issue authority before v19.
-                row:
-                  command.type === "operator.channelPolicy" &&
-                  (getAdmittedSqliteSchemaFacts(db)?.userVersion ?? 0) < 19
-                    ? undefined
-                    : readConfigMachineStateRowInDatabase(db, command.type),
-              };
+            if (isConfigMachineStateReadCommand(command)) {
+              return readConfigMachineStateCommandInDatabase(db, command);
             }
             if (command.type === "workspace.snapshot") {
               return {
@@ -629,6 +649,12 @@ serveOwnedWorkerTasks(
               return {
                 type: command.type,
                 candidates: readWorkerPlacementRecoveryCandidatesInDatabase(db),
+              };
+            }
+            if (command.type === "workers.placementPreservation") {
+              return {
+                type: command.type,
+                placements: readWorkerPlacementsForReconcileInDatabase(db),
               };
             }
             if (command.type === "workers.placementPendingResults") {

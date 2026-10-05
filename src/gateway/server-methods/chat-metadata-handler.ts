@@ -11,7 +11,7 @@ import { PreparedModelRuntimePublicationSupersededError } from "../../agents/pre
 import { normalizeAgentId } from "../../routing/session-key.js";
 import { readUserProfileAliasRevision } from "../../state/user-profile-events.js";
 import type { UserModelAccountSelection } from "../model-account-authority.js";
-import { ModelAccountConnectAuthorityError } from "../model-account-connect.js";
+import { ModelAccountConnectAuthorityError } from "../model-account-connect-errors.js";
 import { prepareOperatorModelPresentation } from "../operator-model-presentation.js";
 import { readOperatorRolePolicyRevision } from "../operator-role-policy.js";
 import { SESSION_READ_SCOPE } from "../operator-scopes.js";
@@ -166,16 +166,21 @@ export async function handleChatMetadataRequest(
     if (!scope) {
       return;
     }
+    if (params.includeModels === false) {
+      scope.includeModels = false;
+    }
     scope.assertCurrent?.();
     const metadata = await context.readChatMetadata(scope);
     scope.draftAccountSelection?.assertCurrent();
     scope.assertCurrent?.();
     const cfg = context.getRuntimeConfig();
-    const policy = prepareOperatorModelPresentation({
-      cfg,
-      policyConfig: context.getCommittedRuntimeConfig?.() ?? cfg,
-      client,
-    })?.forAgent(scope.agentId, metadata.models);
+    const policy =
+      metadata.models &&
+      prepareOperatorModelPresentation({
+        cfg,
+        policyConfig: context.getCommittedRuntimeConfig?.() ?? cfg,
+        client,
+      })?.forAgent(scope.agentId, metadata.models);
     respond(
       true,
       projectModelFastModeCatalog(policy ? policy.metadata(metadata) : metadata, client),

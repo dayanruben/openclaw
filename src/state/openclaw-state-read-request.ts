@@ -7,6 +7,7 @@ import type {
 
 export function captureCommand(command: OpenClawStateReadCommand): OpenClawStateReadCommand {
   if (
+    command.type === "pairing.allowFrom" ||
     command.type === "secrets.metadata" ||
     command.type === "secrets.execEnvironment" ||
     command.type === "secrets.value" ||
@@ -16,6 +17,7 @@ export function captureCommand(command: OpenClawStateReadCommand): OpenClawState
     command.type === "operatorApprovals.history" ||
     command.type === "diagnostic.latest" ||
     command.type === "operatorApprovals.listCronGrants" ||
+    command.type === "operatorApprovals.validateCronGrant" ||
     command.type === "acpSessions.metadata" ||
     command.type === "githubPublication.knownPullRequestUrls" ||
     command.type === "githubRepository.knownPullRequestUrls" ||
@@ -209,6 +211,7 @@ function stringBytes(values: readonly (string | undefined)[]): number {
 
 function commandBytes(command: OpenClawStateReadRequest["command"]): number {
   if (
+    command.type === "pairing.allowFrom" ||
     command.type === "secrets.execEnvironment" ||
     command.type === "secrets.value" ||
     command.type === "sessionState.versions" ||
@@ -364,6 +367,9 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
       Buffer.byteLength(command.input.kind ?? "", "utf8") +
       16
     );
+  }
+  if (command.type === "operatorApprovals.validateCronGrant") {
+    return bytes + Buffer.byteLength(JSON.stringify(command.input), "utf8");
   }
   if (command.type === "operatorApprovals.listCronGrants") {
     return bytes + 8;
