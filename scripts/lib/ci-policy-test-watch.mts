@@ -450,14 +450,12 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
     testFile: "src/auto-reply/reply/get-reply.dashboard.test.ts",
     watchGlobs: ["skills/control-ui/SKILL.md"],
   },
-  ...[
-    "src/boards/board-generated-identity.test.ts",
-    "src/boards/board-store.parity.test.ts",
-    "src/boards/board-store.test.ts",
-  ].map((testFile): PolicyTestWatch => ({
-    testFile,
-    watchGlobs: ["src/boards/sqlite-board-store.worker.ts"],
-  })),
+  ...["src/boards/board-generated-identity.test.ts", "src/boards/board-store.test.ts"].map(
+    (testFile): PolicyTestWatch => ({
+      testFile,
+      watchGlobs: ["src/boards/sqlite-board-store.worker.ts"],
+    }),
+  ),
   ...[
     "src/cli/capability-cli/model.account-secrets.provenance.test.ts",
     "src/commands/models/list.probe.resources.test.ts",
@@ -1592,7 +1590,7 @@ const policyTestWatches: readonly PolicyTestWatch[] = [
     testFile: "src/gateway/control-ui-session-prs-branch.test.ts",
     watchGlobs: [
       "src/gateway/control-ui-session-prs-git.runtime.ts",
-      "src/infra/git-read-operations.runtime.ts",
+      "src/infra/git-operation.worker.ts",
     ],
   },
   {
