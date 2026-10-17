@@ -3,6 +3,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { isIncognitoSessionKey } from "../../../../src/shared/incognito-session-key.js";
 import { notifyListeners } from "../../../../src/shared/listeners.js";
+import type { GatewayHelloOk } from "../../api/gateway.ts";
 import { readOfflineStorageScope, type OfflineStorageClient } from "../../app/boot-record.ts";
 import {
   normalizeAgentId,
@@ -44,7 +45,7 @@ export type ChatComposerScope = {
   settings?: { gatewayUrl?: string | null };
   assistantAgentId?: string | null;
   agentsList?: { defaultId?: string | null; mainKey?: string | null; scope?: string | null } | null;
-  hello?: { snapshot?: unknown } | null;
+  hello?: Pick<GatewayHelloOk, "snapshot"> | null;
 };
 
 /** Sidebar draft presence for a tab row; attachments exist only in durable drafts. */
@@ -640,9 +641,6 @@ export function writeStoredOutboxStore(
   ) {
     options.beforeCommit?.();
     storage.removeItem(target.key);
-    if (storage.getItem(target.key) !== null) {
-      throw new Error("Chat outbox removal verification failed");
-    }
     retireRemovedOutboxPayloads(storage, target, previous, null);
     return;
   }
@@ -657,12 +655,9 @@ export function writeStoredOutboxStore(
     ...(store.legacyReceipts ? { legacyReceipts: store.legacyReceipts } : {}),
   };
   const payload = JSON.stringify(retainedStore);
-  // Verification precedes deleting any legacy source, including quota/no-op writes.
+  // Native Storage throws on failure; retire legacy sources only after this write succeeds.
   options.beforeCommit?.();
   storage.setItem(target.key, payload);
-  if (storage.getItem(target.key) !== payload) {
-    throw new Error("Chat outbox write verification failed");
-  }
   for (const source of pendingLegacyTransfers.get(store) ?? []) {
     if (storage.getItem(source.key) === source.raw) {
       try {
