@@ -1,8 +1,7 @@
 import { createEffect, createMemo } from "solid-js";
-import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
 import { pathForRoute } from "../../app-route-paths.ts";
 import { AgentScopeControl } from "../../components/agent-scope-control.tsx";
-import { SettingsPageHeader } from "../../components/solid/settings-ui.tsx";
+import { HubPageHeader } from "../../components/solid/hub-page-header.tsx";
 import { SettingsWorkspace } from "../../components/solid/settings-workspace.tsx";
 import { shouldHandleNavigationClick } from "../../lib/navigation-click.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
@@ -18,24 +17,21 @@ export function CronPageContent(props: { page: ReturnType<typeof createCronPage>
     revision();
     return buildCronViewProps(props.page);
   });
-  const header = createMemo(() => {
+  const header = () => {
     revision();
     const page = props.page;
     return {
-      title: titleForRoute("cron"),
-      subtitle: page.cron().cronSessionFilter
-        ? t("cron.list.sessionFilter")
-        : subtitleForRoute("cron"),
       filtered: Boolean(page.cron().cronSessionFilter),
       agents: page.inventories.agents.read().agentsList?.agents ?? [],
       selectedAgentId: page.context().agentSelection.state.scopeId,
     };
-  });
+  };
   return (
     <>
-      <SettingsPageHeader
-        title={header().title}
-        subtitle={header().subtitle}
+      <HubPageHeader
+        active="cron"
+        subtitle={header().filtered ? t("cron.list.sessionFilter") : undefined}
+        docsUrl="https://docs.openclaw.ai/automation/cron-jobs"
         actions={
           header().filtered ? (
             <a
