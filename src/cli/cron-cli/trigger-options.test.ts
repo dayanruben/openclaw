@@ -257,6 +257,8 @@ it.each`
   ${["edit", "job-1", "--pacing-min", "30m", "--every", ""]}                                                 | ${"Schedule values must not be blank"}                                                                                        | ${{ configRevision: "revision", pacing: { min: "1m", max: "1h" } }}                                         | ${["cron.get"]}
   ${[...addArgs, "--system-event", "test", "--every", "8640000000000001ms"]}                                 | ${"Invalid --every"}                                                                                                          | ${undefined}                                                                                                | ${undefined}
   ${["edit", "job-1", "--cron", "0 * * * *", "--tz", "UTC", "--stagger", "8640000000000001ms"]}              | ${"Invalid --stagger"}                                                                                                        | ${undefined}                                                                                                | ${undefined}
+  ${["edit", "job-1", "--cron", "0 * * * *", "--stagger", " "]}                                              | ${"Invalid --stagger"}                                                                                                        | ${undefined}                                                                                                | ${undefined}
+  ${[...addMessage, "--trigger-script", "   "]}                                                              | ${"--trigger-script must not be blank"}                                                                                       | ${undefined}                                                                                                | ${undefined}
 `("rejects $args", async ({ args, message, job, reads }: RejectCase) => {
   if (job) {
     existing(job);
@@ -408,13 +410,6 @@ describe("cron trigger CLI options", () => {
     );
   });
 
-  it("rejects an explicitly blank trigger script before adding a job", async () => {
-    await rejectAdd(
-      { "trigger-script": "   ", "system-event": "changed", session: "main" },
-      "--trigger-script must not be blank",
-    );
-  });
-
   it.each(["add", "edit"] as const)(
     "reads the exact payload path and budgets on %s",
     async (operation) => {
@@ -536,4 +531,15 @@ describe("cron scratch", () => {
     await runScratch([...args, "--expected-revision", revision]);
     expectRpc(["set", { content, expectedRevision: Number(revision) }]);
   });
+});
+
+it.each(["standard", "daybreak_blue", "daybreak_red"])(
+  "forwards explicit scheduled Access %s through add and edit",
+  async (cyberAccessProgram) => {
+    await add(["--access", cyberAccessProgram], { cyberAccessProgram });
+    await edit(["--access", cyberAccessProgram], { cyberAccessProgram });
+  },
+);
+it("clears scheduled Access through edit", async () => {
+  await edit(["--clear-access"], { cyberAccessProgram: null });
 });
