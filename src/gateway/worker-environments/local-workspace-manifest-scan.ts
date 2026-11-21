@@ -47,7 +47,7 @@ import type {
   LocalWorkspacePreparedEntry,
 } from "./local-workspace-store.types.js";
 import { scanActualWorkspaceManifest } from "./workspace-actual-manifest.js";
-import { workspaceCtimeIsReusable } from "./workspace-hash-memo.js";
+import { workspaceCtimeIsReusable, workspaceStatIdentity } from "./workspace-hash-memo.js";
 import { sameEntry } from "./workspace-manifest-comparison.js";
 import { parseWorkerWorkspaceManifest } from "./workspace-manifest.js";
 import { workspacePathAncestors } from "./workspace-path-ancestors.js";
@@ -55,6 +55,8 @@ import {
   buildCacheInputPaths,
   isIgnoredWorkspaceBuildOutput,
 } from "./workspace-path-exclusions.js";
+
+const LEGACY_DERIVED_ELIGIBILITY_SUBSETS = [[], ["agp"], ["pnpm"], ["pnpm", "agp"]] as const;
 
 /** Capture owner rows synchronously; filesystem discovery runs after this read scope closes. */
 export function readLocalWorkspaceManifestRows(
@@ -223,9 +225,9 @@ export async function executeLocalWorkspaceManifestRead(
     }
     let canonicalPaths: Set<string> | undefined;
     let scanFailure: unknown;
-    // Older accepted roots can contain the pnpm fallback store. Try current
-    // membership first, then restore only that historical eligibility for repair.
-    for (const includeLegacyPnpmStore of [false, true]) {
+    // Try legacy derived eligibility subsets independently, starting with current membership.
+    // Every candidate must reconstruct the exact saved root before replacement.
+    for (const legacyDerivedEligibilitySubset of LEGACY_DERIVED_ELIGIBILITY_SUBSETS) {
       let projectionPaths: Set<string> | undefined;
       let projectionDirectories: Set<string> | undefined;
       for (const candidate of [
@@ -272,7 +274,7 @@ export async function executeLocalWorkspaceManifestRead(
             includePaths,
             preserveDirectories,
             buildCacheInputs: retained,
-            includeLegacyPnpmStore,
+            legacyDerivedEligibilitySubset,
             onEntry: (node) => nodes.push(node),
           });
         } catch (error) {
@@ -550,13 +552,17 @@ export async function executeLocalWorkspaceManifestRead(
       gitIgnore,
       preserveDirectories,
       buildCacheInputs: new Set(retained),
-      reuseFile: (entryPath, identity, stats) => {
+      reuseFile: (entryPath, stats) => {
         const file = prepared.get(entryPath);
-        return file?.entry.type === "file" &&
-          file.identity === identity &&
+        if (
+          file?.entry.type === "file" &&
+          file.identity === workspaceStatIdentity("gateway", stats) &&
           workspaceCtimeIsReusable(stats.ctimeNs, scanStartedAtMs)
-          ? file.entry
-          : fingerprintScan.reuseFile(entryPath, identity, stats);
+        ) {
+          fingerprintScan.observe(entryPath, file.identity);
+          return file.entry;
+        }
+        return fingerprintScan.reuseFile(entryPath, stats);
       },
       unchangedProbe: action.kind === "probe",
       btrfsSnapshot: capture !== undefined,
